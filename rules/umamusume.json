@@ -1,0 +1,16 @@
+{
+  "id": "umamusume",
+  "name": "ウマ娘 (DMM版)",
+  "sort": 40,
+  "launch_mode": "tun",
+  "url": "",
+  "domains": [
+    "dmm.com",
+    "dmm.co.jp",
+    "cygames.jp"
+  ],
+  "processes": [
+    "umamusume.exe",
+    "DMMGamePlayer.exe"
+  ]
+}

@@ -1,0 +1,16 @@
+{
+  "id": "gbf",
+  "name": "Granblue Fantasy",
+  "sort": 10,
+  "launch_mode": "browser",
+  "url": "https://game.granbluefantasy.jp/",
+  "domains": [
+    "granbluefantasy.jp",
+    "mbga.jp",
+    "mobage.jp"
+  ],
+  "keywords": [
+    "granbluefantasy"
+  ],
+  "processes": []
+}

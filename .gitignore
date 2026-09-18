@@ -1,0 +1,14 @@
+# user credentials & local state — never commit
+private/
+runtime/
+core/
+
+__pycache__/
+*.pyc
+
+# launcher build artifacts
+build/
+dist/
+*.spec
+
+*_release.zip

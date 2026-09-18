@@ -1,0 +1,13 @@
+{
+  "id": "dmm",
+  "name": "DMM GAMES",
+  "sort": 30,
+  "launch_mode": "browser",
+  "url": "https://games.dmm.com/",
+  "domains": [
+    "dmm.com",
+    "dmm.co.jp",
+    "dmmgames.com"
+  ],
+  "processes": []
+}

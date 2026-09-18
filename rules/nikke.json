@@ -1,0 +1,14 @@
+{
+  "id": "nikke",
+  "name": "NIKKE",
+  "sort": 50,
+  "launch_mode": "tun",
+  "url": "",
+  "domains": [
+    "nikke-en.com",
+    "nikke-jp.com"
+  ],
+  "processes": [
+    "nikke.exe"
+  ]
+}

@@ -1,0 +1,16 @@
+{
+  "id": "kancolle",
+  "name": "艦これ",
+  "sort": 20,
+  "launch_mode": "browser",
+  "url": "https://www.dmm.com/netgame/social/-/gadgets/=/app_id=854854/",
+  "domains": [
+    "dmm.com",
+    "dmm.co.jp",
+    "kancolle-server.com"
+  ],
+  "ip_cidrs": [
+    "203.104.209.0/24"
+  ],
+  "processes": []
+}
