@@ -31,6 +31,10 @@ class MihomoApi:
     def get_group(self, group="FLY-JP"):
         return self._request("GET", f"/proxies/{urllib.parse.quote(group, safe='')}")
 
+    def connections(self):
+        """Global stats incl. uploadTotal/downloadTotal since core start."""
+        return self._request("GET", "/connections", timeout=5)
+
     def select(self, node_name, group="FLY-JP"):
         self._request("PUT", f"/proxies/{urllib.parse.quote(group, safe='')}", {"name": node_name})
 

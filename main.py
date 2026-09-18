@@ -13,6 +13,7 @@ from backend.core_installer import install_core as download_core
 from backend.core_manager import CoreManager
 from backend.launcher import log_hints
 from backend.mihomo_api import MihomoApi, JapanNodeSelector
+from backend.subscription import fetch_userinfo, describe_userinfo, fmt_bytes, fmt_speed
 from backend.system_proxy import SystemProxy
 from backend.windows_admin import is_admin, relaunch_as_admin
 
@@ -28,8 +29,8 @@ class FlyApp:
         self.root = root
         self.version = app_version(PATHS)
         self.root.title(f"FLY v{self.version} - Selective Routing")
-        self.root.geometry("900x820")
-        self.root.minsize(820, 720)
+        self.root.geometry("900x860")
+        self.root.minsize(820, 760)
 
         self.logs = queue.Queue()
         self.core = CoreManager(PATHS, self.log)
@@ -37,7 +38,10 @@ class FlyApp:
         self.selector = None
         self.sysproxy_active = False
         self._watch_stop = None
+        self._traffic_stop = None
         self._core_installing = False
+        self._sub_fetching = False
+        self._sub_last = 0.0
 
         self.profiles = []
         self.profile_by_id = {}
@@ -52,6 +56,8 @@ class FlyApp:
         self.source_var = tk.StringVar()
         self.node_var = tk.StringVar(value="-")
         self.delay_var = tk.StringVar(value="-")
+        self.sub_var = tk.StringVar(value="-")
+        self.traffic_var = tk.StringVar(value="-")
 
         self.build()
         self.reload_profiles(first=True)
@@ -85,6 +91,10 @@ class FlyApp:
             elif i==2:
                 ttk.Label(r,text="延迟：").pack(side="left", padx=(18,4))
                 ttk.Label(r,textvariable=self.delay_var).pack(side="left")
+        for label, var in [("订阅流量：",self.sub_var),("实时流量：",self.traffic_var)]:
+            r = ttk.Frame(back); r.pack(fill="x", pady=(8,0))
+            ttk.Label(r,text=label,width=14).pack(side="left")
+            ttk.Label(r,textvariable=var).pack(side="left")
 
         prof = ttk.LabelFrame(outer,text="分流配置（可多选，同时加速）",padding=12)
         prof.pack(fill="x", pady=(0,10))
@@ -176,6 +186,56 @@ class FlyApp:
             self._ensure_core()
         ok,detail=node_source_is_configured(PATHS)
         self.source_var.set(f"就绪（{detail}）" if ok else f"未配置（{detail}）")
+        self._refresh_subscription_info()
+
+    def _refresh_subscription_info(self, force=False):
+        src=load_node_source(PATHS)
+        if str(src.get("mode","file")).lower()!="subscription":
+            self.sub_var.set("本地节点模式（无订阅流量信息）"); return
+        url=str(src.get("subscription_url","")).strip()
+        if not url:
+            self.sub_var.set("-"); return
+        if self._sub_fetching: return
+        if not force and time.time()-self._sub_last<60: return
+        self._sub_fetching=True
+        self.sub_var.set("查询中...")
+        def work():
+            try:
+                info=fetch_userinfo(url)
+                text=describe_userinfo(info)
+            except Exception as e:
+                text=f"查询失败（{e}）"
+            finally:
+                self._sub_fetching=False
+                self._sub_last=time.time()
+            self.root.after(0,lambda t=text:self.sub_var.set(t))
+        threading.Thread(target=work,daemon=True).start()
+
+    def _start_traffic_monitor(self):
+        if self._traffic_stop: self._traffic_stop.set()
+        self._traffic_stop=threading.Event()
+        s=load_app_settings(PATHS)
+        api=MihomoApi(int(s.get("controller_port",19090)), s.get("api_secret",""))
+        threading.Thread(target=self._traffic_loop,args=(self._traffic_stop,api),daemon=True).start()
+
+    def _traffic_loop(self,stop,api):
+        last=None
+        while not stop.wait(2):
+            if not self.core.is_running(): continue
+            try:
+                data=api.connections()
+                up=int(data.get("uploadTotal",0)); down=int(data.get("downloadTotal",0))
+                now=time.time()
+                if last:
+                    dt=max(0.5, now-last[0])
+                    text=(f"↑ {fmt_speed((up-last[1])/dt)}  ↓ {fmt_speed((down-last[2])/dt)}"
+                          f" · 本次经内核 {fmt_bytes(up+down)}（含直连）")
+                else:
+                    text=f"本次经内核 {fmt_bytes(up+down)}（含直连）"
+                last=(now,up,down)
+                self.root.after(0,lambda t=text:self.traffic_var.set(t))
+            except Exception:
+                last=None
 
     def latency_targets(self, selected):
         urls=[]
@@ -271,6 +331,8 @@ class FlyApp:
                 self.sysproxy.enable(port); self.sysproxy_active=True
             log_hints(PATHS,selected,self.log)
             self._start_watchdog()
+            self._start_traffic_monitor()
+            self._refresh_subscription_info(force=True)
             self.root.after(0,lambda:self.status_var.set(f"加速中（{len(effective)} 项）"))
         except Exception as e:
             self.log(f"[ERROR] {e}")
@@ -332,6 +394,9 @@ class FlyApp:
     def _teardown(self):
         if self._watch_stop:
             self._watch_stop.set(); self._watch_stop=None
+        if self._traffic_stop:
+            self._traffic_stop.set(); self._traffic_stop=None
+        self.root.after(0,lambda:self.traffic_var.set("-"))
         if self.sysproxy_active:
             self.sysproxy.restore(); self.sysproxy_active=False
         self.core.stop(); self.selector=None
