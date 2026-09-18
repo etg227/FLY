@@ -1,21 +1,30 @@
 {
-  "id": "pixiv",
-  "name": "Pixiv",
-  "category": "Services",
-  "sort": 65,
-  "launch_mode": "browser",
-  "url": "https://www.pixiv.net/",
-  "domains": [
-    "pixiv.net",
-    "pximg.net",
-    "pixiv.org",
-    "fanbox.cc"
-  ],
-  "keywords": [],
-  "ip_cidrs": [],
-  "processes": [],
-  "ports": [],
-  "latency_test_urls": [
-    "https://www.pixiv.net/robots.txt"
-  ]
+    "id":  "pixiv",
+    "name":  "Pixiv",
+    "category":  "Services",
+    "sort":  65,
+    "launch_mode":  "browser",
+    "url":  "https://www.pixiv.net/",
+    "domains":  [
+                    "pixiv.net",
+                    "pximg.net",
+                    "pixiv.org",
+                    "fanbox.cc"
+                ],
+    "keywords":  [
+
+                 ],
+    "ip_cidrs":  [
+
+                 ],
+    "processes":  [
+
+                  ],
+    "ports":  [
+
+              ],
+    "latency_test_urls":  [
+                              "https://www.pixiv.net/robots.txt"
+                          ],
+    "always_on":  true
 }

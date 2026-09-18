@@ -26,6 +26,7 @@ class Paths:
 DEFAULT_NODE_SOURCE = {"mode": "file", "subscription_url": ""}
 DEFAULT_APP_SETTINGS = {
     "game_exes": {},
+    "services_enabled": True,
     "browser": "auto",
     "mixed_port": 17890,
     "controller_port": 19090,
@@ -108,6 +109,9 @@ def _normalize_profile(rule, source="builtin"):
     # full_browser is an explicit, clearly-labelled opt-in: only a profile that
     # declares it (and gets checked by the user) routes all browser traffic.
     r["full_browser"] = bool(r.get("full_browser"))
+    # always_on profiles (common services) are merged into every start while
+    # the master switch is enabled, instead of appearing as checkboxes.
+    r["always_on"] = bool(r.get("always_on"))
     return r
 
 def load_custom_profiles(paths):

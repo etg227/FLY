@@ -42,8 +42,11 @@ class FlyApp:
         self.profiles = []
         self.profile_by_id = {}
         self.profile_vars = {}
+        self.always_on = []
         self.initial_ids = set(initial_games or [])
 
+        app = load_app_settings(PATHS)
+        self.services_var = tk.BooleanVar(value=bool(app.get("services_enabled", True)))
         self.status_var = tk.StringVar(value="已停止")
         self.core_var = tk.StringVar()
         self.source_var = tk.StringVar()
@@ -86,6 +89,10 @@ class FlyApp:
         prof = ttk.LabelFrame(outer,text="分流配置（可多选，同时加速）",padding=12)
         prof.pack(fill="x", pady=(0,10))
         self.profiles_frame = ttk.Frame(prof); self.profiles_frame.pack(fill="x")
+        self.services_cb = ttk.Checkbutton(prof, variable=self.services_var,
+                                           command=self._services_toggled,
+                                           text="默认加速常用服务")
+        self.services_cb.pack(anchor="w", pady=(8,0))
         actions = ttk.Frame(prof); actions.pack(fill="x", pady=(8,0))
         ttk.Button(actions,text="编辑本地自定义配置",command=self.open_custom_editor).pack(side="left")
         ttk.Label(actions,text="内置/社区配置在 rules\\ 目录；自定义配置只存本机 private\\，不会被提交。").pack(side="left", padx=(10,0))
@@ -114,13 +121,18 @@ class FlyApp:
         previous = {pid for pid,var in self.profile_vars.items() if var.get()}
         self.profiles = list_routing_profiles(PATHS)
         self.profile_by_id = {r["id"]:r for r in self.profiles}
+        self.always_on = [p for p in self.profiles if p.get("always_on")]
+        selectable = [p for p in self.profiles if not p.get("always_on")]
+        names = "、".join(p["name"] for p in self.always_on)
+        self.services_cb.configure(
+            text=f"默认加速常用服务：{names}" if names else "默认加速常用服务（无内置服务配置）")
         for child in self.profiles_frame.winfo_children():
             child.destroy()
         self.profile_vars = {}
         initial = self.initial_ids if first else previous
-        if first and not initial and self.profiles:
-            initial = {self.profiles[0]["id"]}
-        for i, profile in enumerate(self.profiles):
+        if first and not initial and selectable:
+            initial = {selectable[0]["id"]}
+        for i, profile in enumerate(selectable):
             pid = profile["id"]
             var = tk.BooleanVar(value=pid in initial)
             self.profile_vars[pid] = var
@@ -135,6 +147,15 @@ class FlyApp:
 
     def selected_profiles(self):
         return [r["id"] for r in self.profiles if self.profile_vars.get(r["id"]) and self.profile_vars[r["id"]].get()]
+
+    def _services_toggled(self):
+        app=load_app_settings(PATHS)
+        app["services_enabled"]=bool(self.services_var.get())
+        save_json(PATHS.app_settings,app)
+        state="开启" if self.services_var.get() else "关闭"
+        self.log(f"[SERVICES] 常用服务默认加速已{state}。")
+        if self.core.is_running():
+            self.log("[SERVICES] 正在加速中，重新点“一键加速”后生效。")
 
     def log(self,msg): self.logs.put(f"{time.strftime('%H:%M:%S')} {msg}")
 
@@ -203,28 +224,35 @@ class FlyApp:
 
     def start_accel(self):
         selected=self.selected_profiles()
-        if not selected:
-            messagebox.showwarning("FLY","请至少勾选一个分流配置。"); return
+        effective=list(selected)
+        if self.services_var.get():
+            effective+=[p["id"] for p in self.always_on if p["id"] not in effective]
+        if not effective:
+            messagebox.showwarning("FLY","请至少勾选一个分流配置（或开启常用服务默认加速）。"); return
         if not PATHS.core_exe.exists():
             self._ensure_core()
             messagebox.showinfo("FLY","加速内核正在自动下载（进度见日志），完成后再点一键加速。"); return
         ok,_=node_source_is_configured(PATHS)
         if not ok:
             messagebox.showwarning("FLY","请先在设置里配置你自己的节点/订阅。"); return
-        tun_names=[self.profile_by_id[p]["name"] for p in selected if _needs_tun(self.profile_by_id[p])]
+        tun_names=[self.profile_by_id[p]["name"] for p in effective if _needs_tun(self.profile_by_id[p])]
         if tun_names and not is_admin():
             if messagebox.askyesno("FLY",f"{'、'.join(tun_names)} 需要 TUN 模式（管理员权限），是否以管理员身份重启？") \
                and relaunch_as_admin(",".join(selected), autostart=True):
                 self.root.after(300,self.root.destroy)
             return
         self.status_var.set("启动中..."); self.start_btn.configure(state="disabled")
-        threading.Thread(target=self._start_worker,args=(selected,),daemon=True).start()
+        threading.Thread(target=self._start_worker,args=(effective,selected),daemon=True).start()
 
-    def _start_worker(self,selected):
+    def _start_worker(self,effective,selected):
         try:
-            names="、".join(self.profile_by_id[p]["name"] for p in selected)
+            names="、".join(self.profile_by_id[p]["name"] for p in selected) or "（无）"
             self.log(f"[FLY] 已选配置：{names}")
-            self.core.start(selected)
+            if len(effective)>len(selected):
+                svc="、".join(self.profile_by_id[p]["name"] for p in effective if p not in selected)
+                self.log(f"[FLY] 默认加速的常用服务：{svc}")
+            self.core.start(effective)
+            # 测速目标只取用户勾选的配置，常用服务不参与排名，避免测速过重。
             self.selector=self.make_selector(selected)
             s=load_app_settings(PATHS)
             chosen,delay=self.selector.auto_select(
@@ -236,14 +264,14 @@ class FlyApp:
             self.root.after(0,lambda n=chosen:self.node_var.set(n))
             self.root.after(0,lambda d=delay:self.delay_var.set(f"{d} ms" if d is not None else "unknown"))
 
-            uses_tun=any(_needs_tun(self.profile_by_id[p]) for p in selected)
-            has_domain_only=any(not _needs_tun(self.profile_by_id[p]) for p in selected)
+            uses_tun=any(_needs_tun(self.profile_by_id[p]) for p in effective)
+            has_domain_only=any(not _needs_tun(self.profile_by_id[p]) for p in effective)
             if has_domain_only and not uses_tun:
                 port=int(s.get("mixed_port",17890))
                 self.sysproxy.enable(port); self.sysproxy_active=True
             log_hints(PATHS,selected,self.log)
             self._start_watchdog()
-            self.root.after(0,lambda:self.status_var.set(f"加速中（{len(selected)} 项）"))
+            self.root.after(0,lambda:self.status_var.set(f"加速中（{len(effective)} 项）"))
         except Exception as e:
             self.log(f"[ERROR] {e}")
             self._teardown()
