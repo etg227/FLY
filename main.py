@@ -5,8 +5,8 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
 from backend.config import (
-    Paths, ensure_private_files, list_routing_profiles, load_app_settings,
-    load_node_source, load_custom_profiles, save_custom_profiles,
+    Paths, ensure_private_files, list_routing_profiles, list_optional_profiles,
+    load_app_settings, load_node_source, load_custom_profiles, save_custom_profiles,
     node_source_is_configured, save_json, app_version
 )
 from backend.core_installer import install_core as download_core
@@ -94,8 +94,9 @@ class FlyApp:
                                            text="默认加速常用服务")
         self.services_cb.pack(anchor="w", pady=(8,0))
         actions = ttk.Frame(prof); actions.pack(fill="x", pady=(8,0))
-        ttk.Button(actions,text="编辑本地自定义配置",command=self.open_custom_editor).pack(side="left")
-        ttk.Label(actions,text="内置/社区配置在 rules\\ 目录；自定义配置只存本机 private\\，不会被提交。").pack(side="left", padx=(10,0))
+        ttk.Button(actions,text="可选配置库...",command=self.open_optional_library).pack(side="left")
+        ttk.Button(actions,text="编辑本地自定义配置",command=self.open_custom_editor).pack(side="left",padx=(8,0))
+        ttk.Label(actions,text="小众需求在可选库里按需启用；自定义配置只存本机 private\\。").pack(side="left", padx=(10,0))
 
         buttons = ttk.Frame(outer); buttons.pack(fill="x",pady=(2,12))
         self.start_btn = ttk.Button(buttons,text="一键加速",command=self.start_accel); self.start_btn.pack(side="left")
@@ -136,7 +137,7 @@ class FlyApp:
             pid = profile["id"]
             var = tk.BooleanVar(value=pid in initial)
             self.profile_vars[pid] = var
-            source = "自定义" if profile.get("source")=="custom" else ""
+            source = {"custom":"自定义","optional":"可选"}.get(profile.get("source"),"")
             mode = "TUN" if _needs_tun(profile) else "域名"
             if profile.get("full_browser"):
                 mode = "整浏览器"
@@ -217,6 +218,9 @@ class FlyApp:
 
     def open_custom_editor(self):
         CustomProfilesWindow(self.root, self._custom_saved)
+
+    def open_optional_library(self):
+        OptionalLibraryWindow(self.root, self._custom_saved)
 
     def _custom_saved(self):
         self.reload_profiles(first=False)
@@ -405,6 +409,36 @@ class SettingsWindow(tk.Toplevel):
         app["sticky_max_delay_ms"]=sticky
         save_json(PATHS.app_settings,app)
         self.on_saved(); messagebox.showinfo("FLY","设置已保存。"); self.destroy()
+
+class OptionalLibraryWindow(tk.Toplevel):
+    def __init__(self,master,on_saved):
+        super().__init__(master)
+        self.title("FLY - 可选配置库"); self.geometry("560x480")
+        self.on_saved=on_saved
+        self.items=list_optional_profiles(PATHS)
+        enabled={str(x) for x in load_app_settings(PATHS).get("enabled_optional",[])}
+        self.vars={p["id"]:tk.BooleanVar(value=p["id"] in enabled) for p in self.items}
+
+        f=ttk.Frame(self,padding=14); f.pack(fill="both",expand=True)
+        ttk.Label(f,text="可选配置库",font=("Segoe UI",13,"bold")).pack(anchor="w")
+        ttk.Label(f,text="这里是不属于所有人的独立需求配置：勾选后加入主界面的分流列表，随程序更新自动维护；不勾选则完全不加载。",
+                  wraplength=520).pack(anchor="w",pady=(4,10))
+        listf=ttk.Frame(f); listf.pack(fill="both",expand=True)
+        if not self.items:
+            ttk.Label(listf,text="（当前没有可选配置，欢迎往 optional\\ 目录提 PR）").pack(anchor="w")
+        for p in self.items:
+            row=ttk.Frame(listf); row.pack(fill="x",pady=3)
+            ttk.Checkbutton(row,text=p["name"],variable=self.vars[p["id"]]).pack(side="left")
+            ttk.Label(row,text=" / ".join(p.get("domains",[])[:3]),foreground="#888").pack(side="left",padx=(10,0))
+        ttk.Label(f,text="内容站点由第三方运营，与本项目无关；请遵守所在地法律与站点条款。",
+                  wraplength=520).pack(anchor="w",pady=(10,0))
+        ttk.Button(f,text="保存",command=self.save).pack(anchor="e",pady=(10,0))
+
+    def save(self):
+        app=load_app_settings(PATHS)
+        app["enabled_optional"]=[pid for pid,var in self.vars.items() if var.get()]
+        save_json(PATHS.app_settings,app)
+        self.on_saved(); self.destroy()
 
 class CustomProfilesWindow(tk.Toplevel):
     TEMPLATE = {

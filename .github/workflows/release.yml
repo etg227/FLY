@@ -36,7 +36,7 @@ jobs:
           $stage = Join-Path $env:RUNNER_TEMP "fly-update"
           New-Item -ItemType Directory -Force -Path $stage | Out-Null
           $files = @("main.py","launcher.py","README.md","LICENSE","VERSION","START_FLY_DEBUG.bat",".gitignore")
-          $dirs = @("backend","rules","scripts")
+          $dirs = @("backend","rules","optional","scripts")
           foreach ($f in $files) {
             if (Test-Path $f) { Copy-Item $f (Join-Path $stage $f) }
           }

@@ -15,6 +15,8 @@ class Paths:
     @property
     def rules(self): return self.app / "rules"
     @property
+    def optional(self): return self.app / "optional"
+    @property
     def node_source(self): return self.private / "node_source.json"
     @property
     def nodes_yaml(self): return self.private / "nodes.yaml"
@@ -27,6 +29,7 @@ DEFAULT_NODE_SOURCE = {"mode": "file", "subscription_url": ""}
 DEFAULT_APP_SETTINGS = {
     "game_exes": {},
     "services_enabled": True,
+    "enabled_optional": [],
     "browser": "auto",
     "mixed_port": 17890,
     "controller_port": 19090,
@@ -97,7 +100,8 @@ def _normalize_profile(rule, source="builtin"):
     r["name"] = str(r.get("name", r["id"])).strip()
     r["source"] = source
     r.setdefault("sort", 99)
-    r.setdefault("category", "Games" if source == "builtin" else "Custom")
+    default_category = {"builtin": "Games", "optional": "Optional"}.get(source, "Custom")
+    r.setdefault("category", default_category)
     r.setdefault("launch_mode", "browser")
     for key in ("domains","keywords","ip_cidrs","processes","ports","latency_test_urls"):
         value = r.get(key, [])
@@ -136,6 +140,21 @@ def save_custom_profiles(paths, profiles):
             cleaned.append(p)
     save_json(paths.custom_profiles, {"profiles": cleaned})
 
+def list_optional_profiles(paths):
+    """The opt-in library: shipped with the repo but only loaded into the main
+    list for users who enabled them (settings key enabled_optional)."""
+    out = []
+    if paths.optional.exists():
+        for f in sorted(paths.optional.glob("*.json")):
+            try:
+                rule = json.loads(f.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            p = _normalize_profile(rule, "optional")
+            if p["id"] and p["name"]:
+                out.append(p)
+    return out
+
 def list_routing_profiles(paths):
     profiles = []
     for f in sorted(paths.rules.glob("*.json")):
@@ -146,6 +165,8 @@ def list_routing_profiles(paths):
         p = _normalize_profile(rule, "builtin")
         if p["id"] and p["name"]:
             profiles.append(p)
+    enabled = {str(x) for x in load_app_settings(paths).get("enabled_optional", [])}
+    profiles.extend(p for p in list_optional_profiles(paths) if p["id"] in enabled)
     profiles.extend(load_custom_profiles(paths))
     by_id = {p["id"]: p for p in profiles}
     profiles = list(by_id.values())
