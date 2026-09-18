@@ -66,24 +66,24 @@ def _parse_sha256(blob: bytes) -> str:
     text = blob.decode("utf-8-sig", errors="replace").strip()
     m = re.search(r"\b([a-fA-F0-9]{64})\b", text)
     if not m:
-        raise RuntimeError("Release checksum file does not contain a SHA-256 value.")
+        raise RuntimeError("Release 校验文件里没有 SHA-256 值。")
     return m.group(1).lower()
 
 def _safe_extract_update(data: bytes, expected_sha: str, root: Path, ui):
     actual = hashlib.sha256(data).hexdigest()
     if actual.lower() != expected_sha.lower():
-        raise RuntimeError(f"Update checksum mismatch; refusing update ({actual[:12]} != {expected_sha[:12]}).")
+        raise RuntimeError(f"更新包校验不一致，拒绝更新（{actual[:12]} != {expected_sha[:12]}）。")
     with tempfile.TemporaryDirectory(prefix="fly-update-") as td:
         tdir = Path(td)
         with zipfile.ZipFile(io.BytesIO(data)) as zf:
             bad = [n for n in zf.namelist() if Path(n).is_absolute() or ".." in Path(n).parts]
             if bad:
-                raise RuntimeError("Unsafe path found in update archive.")
+                raise RuntimeError("更新包内发现不安全路径，已拒绝。")
             zf.extractall(tdir)
         entries = [p for p in tdir.iterdir()]
         top = entries[0] if len(entries)==1 and entries[0].is_dir() else tdir
         if not (top / "main.py").exists() or not (top / "VERSION").exists():
-            raise RuntimeError("Update archive is missing required FLY files.")
+            raise RuntimeError("更新包缺少必要的程序文件。")
         for src in top.rglob("*"):
             rel = src.relative_to(top)
             if rel.parts and rel.parts[0] in PROTECTED:
@@ -94,7 +94,7 @@ def _safe_extract_update(data: bytes, expected_sha: str, root: Path, ui):
             else:
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(src, dst)
-    ui.log("Release checksum verified (SHA-256).")
+    ui.log("更新包 SHA-256 校验通过。")
 
 OBSOLETE = ["START_FLY.bat","LAUNCHER.bat","INSTALL_CORE.bat","start_fly.py",
             "FLY.exe","launcher.spec","FLY.spec","scripts/INSTALL_CORE.ps1"]
@@ -104,9 +104,9 @@ def apply_release_update(root: Path, assets, ui):
     sum_url = assets.get(CHECKSUM_ASSET)
     if not zip_url or not sum_url:
         raise RuntimeError(
-            f"Latest release has no verified updater pair ({UPDATE_ASSET} + {CHECKSUM_ASSET}); leaving current version unchanged."
+            f"最新 Release 缺少可验证的更新文件对（{UPDATE_ASSET} + {CHECKSUM_ASSET}），保持当前版本不变。"
         )
-    ui.log("Downloading versioned release payload from GitHub...")
+    ui.log("正在从 GitHub Release 下载更新包...")
     expected = _parse_sha256(fetch(sum_url, ui))
     data = fetch(zip_url, ui)
     _safe_extract_update(data, expected, root, ui)
@@ -141,15 +141,15 @@ def windowless(python_cmd):
     return list(python_cmd), False
 
 def install_python(ui):
-    ui.status(f"Downloading Python {PYTHON_VERSION} from python.org...")
+    ui.status(f"正在从 python.org 下载 Python {PYTHON_VERSION}（约 26MB）...")
     tmp=Path(tempfile.mkdtemp(prefix="fly-python-"))
     exe=tmp/f"python-{PYTHON_VERSION}-amd64.exe"
     try:
         data=fetch(PYTHON_URLS[0],ui)
     except Exception as e:
-        ui.log(f"Python download failed: {e}"); return None
+        ui.log(f"Python 下载失败：{e}"); return None
     exe.write_bytes(data)
-    ui.status("Installing Python...")
+    ui.status("正在静默安装 Python（约 1-2 分钟，请勿关闭窗口）...")
     ui.progress(None)
     r=subprocess.run([str(exe),"/quiet","InstallAllUsers=0","PrependPath=1",
                       "Include_launcher=1","InstallLauncherAllUsers=0",
@@ -158,7 +158,7 @@ def install_python(ui):
                       "AssociateFiles=0","Shortcuts=0"],
                      timeout=900,creationflags=getattr(subprocess,"CREATE_NO_WINDOW",0))
     if r.returncode != 0:
-        ui.log(f"Python installer returned {r.returncode}."); return None
+        ui.log(f"Python 安装程序返回错误码 {r.returncode}。"); return None
     return find_python()
 
 CORE_API="https://api.github.com/repos/MetaCubeX/mihomo/releases/latest"
@@ -167,50 +167,50 @@ CORE_PATTERNS=(r"^mihomo-windows-amd64-v1-v[0-9].*\.zip$",r"^mihomo-windows-amd6
 def ensure_core(root: Path, ui):
     core=root/"core"/"mihomo.exe"
     if core.exists(): return
-    ui.status("Downloading Mihomo core from official GitHub Release...")
+    ui.status("正在从 MetaCubeX 官方 Release 下载加速内核（约 21MB）...")
     ui.progress(None)
     data=json.loads(fetch(CORE_API,ui).decode("utf-8",errors="replace"))
     asset=None
     for pat in CORE_PATTERNS:
         asset=next((a for a in data.get("assets",[]) if re.match(pat,a.get("name",""))),None)
         if asset: break
-    if not asset: raise RuntimeError("No compatible Mihomo Windows asset found.")
+    if not asset: raise RuntimeError("未找到兼容的 Mihomo Windows 安装包。")
     blob=fetch(asset["browser_download_url"],ui)
     with zipfile.ZipFile(io.BytesIO(blob)) as zf:
         name=next((n for n in zf.namelist() if re.search(r"mihomo.*\.exe$",n)),None)
-        if not name: raise RuntimeError("Mihomo archive contains no executable.")
+        if not name: raise RuntimeError("Mihomo 安装包里没有可执行文件。")
         core.parent.mkdir(parents=True,exist_ok=True)
         core.write_bytes(zf.read(name))
-    ui.log("Mihomo core installed.")
+    ui.log("加速内核安装完成。")
 
 def run_flow(root: Path, ui):
-    ui.status("Checking GitHub Releases...")
+    ui.status("正在检查 GitHub Release 更新...")
     cur=local_version(root)
     try:
         remote,assets=latest_release(ui)
         if remote and _version_tuple(remote) > _version_tuple(cur):
-            ui.status(f"Verified update available: {remote}")
+            ui.status(f"发现已验证的新版本 {remote}，正在更新...")
             apply_release_update(root,assets,ui)
-            ui.log(f"Updated {cur} -> {remote}")
+            ui.log(f"已更新：{cur} → {remote}")
         elif remote:
-            ui.log(f"Current version is up to date ({cur}).")
+            ui.log(f"已是最新版本（{cur}）。")
     except Exception as e:
-        ui.log(f"Update skipped safely: {e}")
+        ui.log(f"更新已安全跳过：{e}")
 
     if not (root/"main.py").exists():
-        raise RuntimeError("main.py is missing. Reinstall FLY from a GitHub Release.")
-    ui.status("Checking runtime...")
+        raise RuntimeError("缺少程序文件 main.py，首次运行需要能访问 GitHub Release，请检查网络后重试。")
+    ui.status("检查运行环境...")
     ui.progress(None)
     py=find_python()
     if not py: py=install_python(ui)
     if not py:
         try: webbrowser.open("https://www.python.org/downloads/")
         except Exception: pass
-        raise RuntimeError("Python installation failed. Install Python 3.11+ and launch again.")
+        raise RuntimeError('自动安装 Python 失败。已打开官网下载页，请手动安装（勾选 "Add python.exe to PATH"）后重新运行本程序。')
     try:
         ensure_core(root,ui)
     except Exception as e:
-        ui.log(f"Core download incomplete ({e}); main app will retry.")
+        ui.log(f"内核下载未完成（{e}），主程序会自动重试。")
     return py
 
 def launch(root: Path, python_cmd):
@@ -221,15 +221,15 @@ def launch(root: Path, python_cmd):
 class LauncherApp(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("FLY Launcher"); self.geometry("470x320"); self.resizable(False,False)
+        self.title("FLY 启动器"); self.geometry("470x320"); self.resizable(False,False)
         self.q=queue.Queue()
         f=ttk.Frame(self,padding=16); f.pack(fill="both",expand=True)
         ttk.Label(f,text="FLY",font=("Segoe UI",16,"bold")).pack(anchor="w")
-        self.status_lbl=ttk.Label(f,text="Preparing..."); self.status_lbl.pack(anchor="w",pady=(6,4))
+        self.status_lbl=ttk.Label(f,text="准备中..."); self.status_lbl.pack(anchor="w",pady=(6,4))
         self.bar=ttk.Progressbar(f,mode="indeterminate"); self.bar.pack(fill="x",pady=(0,8)); self.bar.start(12)
         self.logbox=tk.Text(f,height=9,font=("Segoe UI",9),state="disabled",relief="flat",background=self.cget("background"))
         self.logbox.pack(fill="both",expand=True)
-        self.exit_btn=ttk.Button(f,text="Exit",command=self.destroy)
+        self.exit_btn=ttk.Button(f,text="退出",command=self.destroy)
         threading.Thread(target=self.worker,daemon=True).start()
         self.after(100,self.poll)
 
@@ -241,7 +241,7 @@ class LauncherApp(tk.Tk):
         root=app_dir()
         try:
             py=run_flow(root,self)
-            self.status("Starting FLY...")
+            self.status("启动 FLY...")
             launch(root,py)
             self.q.put(("done",None))
         except Exception as e:
@@ -260,11 +260,11 @@ class LauncherApp(tk.Tk):
                 elif kind=="log": self._append(val)
                 elif kind=="done":
                     self.bar.stop(); self.bar.configure(mode="determinate",value=100)
-                    self.status_lbl.configure(text="Started ✓")
+                    self.status_lbl.configure(text="启动完成 ✓")
                     self.after(1200,self.destroy); return
                 elif kind=="error":
-                    self.bar.stop(); self.status_lbl.configure(text="Error")
-                    self._append("[ERROR] "+val)
+                    self.bar.stop(); self.status_lbl.configure(text="出错了")
+                    self._append("[错误] "+val)
                     self.exit_btn.pack(anchor="e",pady=(8,0))
         except queue.Empty: pass
         self.after(100,self.poll)

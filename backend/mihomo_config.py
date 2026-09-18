@@ -11,6 +11,11 @@ FAKE_IP_FILTER = [
 DNS_NAMESERVERS = ["223.5.5.5", "119.29.29.29", "https://doh.pub/dns-query"]
 DNS_BOOTSTRAP = ["223.5.5.5", "119.29.29.29"]
 
+# When a full_browser profile is selected together with a TUN profile, the
+# system proxy stays off and browser traffic rides TUN instead — match it by
+# browser process name so the coverage survives the mixed selection.
+BROWSER_PROCESSES = ["msedge.exe", "chrome.exe", "firefox.exe", "brave.exe"]
+
 def _dedup(items):
     out, seen = [], set()
     for x in items:
@@ -45,6 +50,7 @@ def build_runtime_config(paths: Paths, profile_ids):
     keywords = _dedup(str(k).lower() for p in profiles for k in p.get("keywords", []))
     cidrs = _dedup(c for p in profiles for c in p.get("ip_cidrs", []))
     ports = _dedup(p for profile in profiles for p in profile.get("ports", []))
+    full_browser = any(bool(p.get("full_browser")) for p in profiles)
 
     tun_mode = bool(processes) or any(str(p.get("launch_mode","browser")).lower()=="tun" for p in profiles)
 
@@ -140,6 +146,9 @@ def build_runtime_config(paths: Paths, profile_ids):
             lines.append(f"  - AND,((NETWORK,udp),(DST-PORT,443),(DOMAIN-SUFFIX,{d})),REJECT")
         for k in keywords:
             lines.append(f"  - AND,((NETWORK,udp),(DST-PORT,443),(DOMAIN-KEYWORD,{k})),REJECT")
+        if full_browser:
+            for b in BROWSER_PROCESSES:
+                lines.append(f"  - AND,((NETWORK,udp),(DST-PORT,443),(PROCESS-NAME,{b})),REJECT")
 
     for proc in processes:
         lines.append(f"  - PROCESS-NAME,{proc},FLY-JP")
@@ -151,6 +160,15 @@ def build_runtime_config(paths: Paths, profile_ids):
         lines.append(f"  - IP-CIDR,{c},FLY-JP,no-resolve")
     for port in ports:
         lines.append(f"  - DST-PORT,{port},FLY-JP")
+
+    # Explicit opt-in only (a checked profile with full_browser: true): route
+    # everything the browser sends through FLY-JP. Covers portals like
+    # DMM/FANZA whose in-portal games load from unenumerable vendor domains.
+    if full_browser:
+        lines.append(f"  - IN-PORT,{mixed},FLY-JP")
+        if tun_mode:
+            for b in BROWSER_PROCESSES:
+                lines.append(f"  - PROCESS-NAME,{b},FLY-JP")
 
     lines.append("  - MATCH,DIRECT")
     lines.append("")

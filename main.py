@@ -44,9 +44,7 @@ class FlyApp:
         self.profile_vars = {}
         self.initial_ids = set(initial_games or [])
 
-        app = load_app_settings(PATHS)
-        self.routing_mode = tk.StringVar(value=app.get("routing_mode","automatic"))
-        self.status_var = tk.StringVar(value="Stopped")
+        self.status_var = tk.StringVar(value="已停止")
         self.core_var = tk.StringVar()
         self.source_var = tk.StringVar()
         self.node_var = tk.StringVar(value="-")
@@ -58,8 +56,8 @@ class FlyApp:
         self.root.after(100, self.flush_logs)
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
-        self.log(f"FLY v{self.version} ready.")
-        self.log("Safety rule: only explicit profile matches use FLY-JP; everything else is DIRECT.")
+        self.log(f"FLY v{self.version} 就绪。")
+        self.log("安全原则：只有命中所选配置的流量走 FLY-JP，其余一律 DIRECT。")
         self.sysproxy.restore_orphan()
         if autostart:
             self.log("[FLY] Autostart requested (admin relaunch).")
@@ -70,67 +68,47 @@ class FlyApp:
         ttk.Label(outer, text=f"FLY v{self.version}", font=("Segoe UI",21,"bold")).pack(anchor="w")
         ttk.Label(
             outer,
-            text="Use your own Clash/Mihomo nodes. Route only selected region-restricted apps/services; keep everything else local.",
+            text="使用你自己的 Clash/Mihomo 节点，只让勾选的区域限定应用/服务走日本线路，其余流量保持本地直连。",
             wraplength=840
         ).pack(anchor="w", pady=(0,12))
 
-        modebox = ttk.LabelFrame(outer, text="Mode", padding=10); modebox.pack(fill="x", pady=(0,10))
-        row = ttk.Frame(modebox); row.pack(fill="x")
-        ttk.Radiobutton(row, text="Automatic", variable=self.routing_mode, value="automatic",
-                        command=self._mode_changed).pack(side="left")
-        ttk.Radiobutton(row, text="Advanced", variable=self.routing_mode, value="advanced",
-                        command=self._mode_changed).pack(side="left", padx=(18,0))
-        ttk.Radiobutton(row, text="Custom", variable=self.routing_mode, value="custom",
-                        command=self._mode_changed).pack(side="left", padx=(18,0))
-        ttk.Label(
-            modebox,
-            text="Automatic picks a healthy JP node. Advanced keeps manual switch/settings visible. Custom stores your own profiles locally under private/.",
-            wraplength=820
-        ).pack(anchor="w", pady=(6,0))
-
-        back = ttk.LabelFrame(outer, text="Backend", padding=10); back.pack(fill="x", pady=(0,10))
-        for i, (label, var) in enumerate([("Core:",self.core_var),("Node source:",self.source_var),("Japan node:",self.node_var)]):
+        back = ttk.LabelFrame(outer, text="后端", padding=10); back.pack(fill="x", pady=(0,10))
+        for i, (label, var) in enumerate([("内核：",self.core_var),("节点来源：",self.source_var),("日本节点：",self.node_var)]):
             r = ttk.Frame(back); r.pack(fill="x", pady=(0 if i==0 else 8,0))
             ttk.Label(r,text=label,width=14).pack(side="left")
             ttk.Label(r,textvariable=var,font=("Segoe UI",10,"bold") if i==2 else None).pack(side="left")
             if i==1:
-                ttk.Button(r,text="Node / App Settings",command=self.open_settings).pack(side="right")
+                ttk.Button(r,text="节点 / 应用设置",command=self.open_settings).pack(side="right")
             elif i==2:
-                ttk.Label(r,text="Latency:").pack(side="left", padx=(18,4))
+                ttk.Label(r,text="延迟：").pack(side="left", padx=(18,4))
                 ttk.Label(r,textvariable=self.delay_var).pack(side="left")
 
-        prof = ttk.LabelFrame(outer,text="Selective routing profiles（可多选）",padding=12)
+        prof = ttk.LabelFrame(outer,text="分流配置（可多选，同时加速）",padding=12)
         prof.pack(fill="x", pady=(0,10))
         self.profiles_frame = ttk.Frame(prof); self.profiles_frame.pack(fill="x")
         actions = ttk.Frame(prof); actions.pack(fill="x", pady=(8,0))
-        ttk.Button(actions,text="Edit local custom profiles",command=self.open_custom_editor).pack(side="left")
-        ttk.Label(actions,text="Community/built-in profiles live in rules/; your custom profiles never leave private/.").pack(side="left", padx=(10,0))
+        ttk.Button(actions,text="编辑本地自定义配置",command=self.open_custom_editor).pack(side="left")
+        ttk.Label(actions,text="内置/社区配置在 rules\\ 目录；自定义配置只存本机 private\\，不会被提交。").pack(side="left", padx=(10,0))
 
         buttons = ttk.Frame(outer); buttons.pack(fill="x",pady=(2,12))
-        self.start_btn = ttk.Button(buttons,text="Start routing",command=self.start_accel); self.start_btn.pack(side="left")
-        ttk.Button(buttons,text="Stop",command=self.stop_accel).pack(side="left",padx=8)
-        self.switch_btn = ttk.Button(buttons,text="Switch JP node",command=self.switch_node)
+        self.start_btn = ttk.Button(buttons,text="一键加速",command=self.start_accel); self.start_btn.pack(side="left")
+        ttk.Button(buttons,text="停止",command=self.stop_accel).pack(side="left",padx=8)
+        self.switch_btn = ttk.Button(buttons,text="换日本节点",command=self.switch_node)
         self.switch_btn.pack(side="left",padx=8)
-        ttk.Button(buttons,text="Refresh",command=self.refresh_status).pack(side="left",padx=8)
-        ttk.Label(buttons,text="Status:").pack(side="right")
+        ttk.Button(buttons,text="刷新状态",command=self.refresh_status).pack(side="left",padx=8)
+        ttk.Label(buttons,text="状态：").pack(side="right")
         ttk.Label(buttons,textvariable=self.status_var,font=("Segoe UI",10,"bold")).pack(side="right",padx=(0,5))
 
-        route = ttk.LabelFrame(outer,text="Routing guarantee",padding=10); route.pack(fill="x",pady=(0,10))
+        route = ttk.LabelFrame(outer,text="分流保证",padding=10); route.pack(fill="x",pady=(0,10))
         ttk.Label(route,justify="left",wraplength=840,text=(
-            "Domain/IP/port/process rules are explicit. There is no full-browser catch-all. "
-            "Anything that does not match a selected profile ends at MATCH,DIRECT and uses your normal network.\n"
-            "Profiles with process matching use TUN and require administrator rights. Domain-only browser profiles can use the local system proxy."
+            "域名 / IP / 端口 / 进程规则全部显式声明，未命中所选配置的流量一律 MATCH,DIRECT 走你的正常网络。\n"
+            "唯一例外：标注“整浏览器”的配置（如 DMM/FANZA 页游）勾选后浏览器全部流量走日本线路，用于游戏本体域名无法穷举的平台，玩完请停止加速。\n"
+            "带进程匹配的配置使用 TUN，需要管理员权限；纯域名配置使用本机系统代理，停止或异常退出后自动还原。"
         )).pack(anchor="w")
 
         logf = ttk.LabelFrame(outer,text="Live log",padding=8); logf.pack(fill="both",expand=True)
         self.logbox = tk.Text(logf,wrap="word",font=("Consolas",9),height=14); self.logbox.pack(side="left",fill="both",expand=True)
         sb=ttk.Scrollbar(logf,orient="vertical",command=self.logbox.yview); sb.pack(side="right",fill="y"); self.logbox.configure(yscrollcommand=sb.set)
-
-    def _mode_changed(self):
-        app = load_app_settings(PATHS)
-        app["routing_mode"] = self.routing_mode.get()
-        save_json(PATHS.app_settings, app)
-        self.log(f"[MODE] {self.routing_mode.get()}")
 
     def reload_profiles(self, first=False):
         previous = {pid for pid,var in self.profile_vars.items() if var.get()}
@@ -146,8 +124,10 @@ class FlyApp:
             pid = profile["id"]
             var = tk.BooleanVar(value=pid in initial)
             self.profile_vars[pid] = var
-            source = "custom" if profile.get("source")=="custom" else profile.get("category","")
-            mode = "TUN" if _needs_tun(profile) else "domain"
+            source = "自定义" if profile.get("source")=="custom" else ""
+            mode = "TUN" if _needs_tun(profile) else "域名"
+            if profile.get("full_browser"):
+                mode = "整浏览器"
             text = f"{profile['name']}  [{mode}{' / '+source if source else ''}]"
             ttk.Checkbutton(self.profiles_frame,text=text,variable=var).grid(
                 row=i//2,column=i%2,sticky="w",padx=(0,24),pady=2
@@ -167,14 +147,14 @@ class FlyApp:
 
     def refresh_status(self):
         if PATHS.core_exe.exists():
-            self.core_var.set("Ready")
+            self.core_var.set("就绪")
         elif self._core_installing:
-            self.core_var.set("Downloading...")
+            self.core_var.set("自动下载中...")
         else:
-            self.core_var.set("Missing")
+            self.core_var.set("缺失")
             self._ensure_core()
         ok,detail=node_source_is_configured(PATHS)
-        self.source_var.set(f"Ready ({detail})" if ok else f"Not configured ({detail})")
+        self.source_var.set(f"就绪（{detail}）" if ok else f"未配置（{detail}）")
 
     def latency_targets(self, selected):
         urls=[]
@@ -192,19 +172,20 @@ class FlyApp:
             self.log,
             keywords=s.get("jp_keywords"),
             test_urls=self.latency_targets(selected or self.selected_profiles()),
-            timeout_ms=int(s.get("latency_timeout_ms",5000))
+            timeout_ms=int(s.get("latency_timeout_ms",5000)),
+            light_url=s.get("latency_test_url","https://www.gstatic.com/generate_204")
         )
 
     def _ensure_core(self):
         if PATHS.core_exe.exists() or self._core_installing: return
         self._core_installing=True
         self.refresh_status()
-        self.log("[CORE] Mihomo core missing; downloading from official release...")
+        self.log("[CORE] 未检测到加速内核，正在从官方 Release 自动下载...")
         def work():
             try:
                 download_core(PATHS,self.log)
             except Exception as e:
-                self.log(f"[CORE] Download failed: {e}")
+                self.log(f"[CORE] 自动下载失败：{e}（点“刷新状态”会自动重试）")
             finally:
                 self._core_installing=False
                 self.root.after(0,self.refresh_status)
@@ -218,31 +199,31 @@ class FlyApp:
 
     def _custom_saved(self):
         self.reload_profiles(first=False)
-        self.log("[CUSTOM] Local profiles reloaded.")
+        self.log("[CUSTOM] 本地自定义配置已重新加载。")
 
     def start_accel(self):
         selected=self.selected_profiles()
         if not selected:
-            messagebox.showwarning("FLY","Select at least one routing profile."); return
+            messagebox.showwarning("FLY","请至少勾选一个分流配置。"); return
         if not PATHS.core_exe.exists():
             self._ensure_core()
-            messagebox.showinfo("FLY","Mihomo is downloading. Try Start again after it finishes."); return
+            messagebox.showinfo("FLY","加速内核正在自动下载（进度见日志），完成后再点一键加速。"); return
         ok,_=node_source_is_configured(PATHS)
         if not ok:
-            messagebox.showwarning("FLY","Configure your own node/subscription first."); return
+            messagebox.showwarning("FLY","请先在设置里配置你自己的节点/订阅。"); return
         tun_names=[self.profile_by_id[p]["name"] for p in selected if _needs_tun(self.profile_by_id[p])]
         if tun_names and not is_admin():
-            if messagebox.askyesno("FLY",f"TUN is required by {'、'.join(tun_names)}. Restart as administrator?") \
+            if messagebox.askyesno("FLY",f"{'、'.join(tun_names)} 需要 TUN 模式（管理员权限），是否以管理员身份重启？") \
                and relaunch_as_admin(",".join(selected), autostart=True):
                 self.root.after(300,self.root.destroy)
             return
-        self.status_var.set("Starting..."); self.start_btn.configure(state="disabled")
+        self.status_var.set("启动中..."); self.start_btn.configure(state="disabled")
         threading.Thread(target=self._start_worker,args=(selected,),daemon=True).start()
 
     def _start_worker(self,selected):
         try:
-            names=", ".join(self.profile_by_id[p]["name"] for p in selected)
-            self.log(f"[FLY] Selected profile(s): {names}")
+            names="、".join(self.profile_by_id[p]["name"] for p in selected)
+            self.log(f"[FLY] 已选配置：{names}")
             self.core.start(selected)
             self.selector=self.make_selector(selected)
             s=load_app_settings(PATHS)
@@ -262,18 +243,18 @@ class FlyApp:
                 self.sysproxy.enable(port); self.sysproxy_active=True
             log_hints(PATHS,selected,self.log)
             self._start_watchdog()
-            self.root.after(0,lambda:self.status_var.set(f"Routing ({len(selected)})"))
+            self.root.after(0,lambda:self.status_var.set(f"加速中（{len(selected)} 项）"))
         except Exception as e:
             self.log(f"[ERROR] {e}")
             self._teardown()
-            self.root.after(0,lambda:self.status_var.set("Stopped"))
+            self.root.after(0,lambda:self.status_var.set("已停止"))
             self.root.after(0,lambda:messagebox.showerror("FLY",str(e)))
         finally:
             self.root.after(0,lambda:self.start_btn.configure(state="normal"))
 
     def switch_node(self):
         if not self.core.is_running():
-            messagebox.showinfo("FLY","Start routing first."); return
+            messagebox.showinfo("FLY","请先启动加速。"); return
         def work():
             try:
                 sel=self.selector or self.make_selector()
@@ -305,13 +286,13 @@ class FlyApp:
             try:
                 current=sel.api.get_group("FLY-JP").get("now")
                 if not current: continue
-                sel.measure(current); fails=0
+                sel.measure_light(current); fails=0
             except Exception:
                 fails+=1
-                self.log(f"[WATCH] Node check failed ({fails}/3).")
+                self.log(f"[WATCH] 节点检测失败（{fails}/3）。")
                 if fails>=3:
                     fails=0
-                    self.log("[WATCH] Reselecting a healthy Japan node...")
+                    self.log("[WATCH] 当前节点疑似失效，重新选择可用日本节点...")
                     try:
                         chosen,delay=sel.auto_select("FLY-JP",wait_s=10)
                         self._remember_node(chosen)
@@ -329,8 +310,8 @@ class FlyApp:
 
     def stop_accel(self):
         self._teardown()
-        self.node_var.set("-"); self.delay_var.set("-"); self.status_var.set("Stopped")
-        self.log("[FLY] Routing stopped.")
+        self.node_var.set("-"); self.delay_var.set("-"); self.status_var.set("已停止")
+        self.log("[FLY] 加速已停止。")
 
     def on_close(self):
         self._teardown(); self.root.destroy()
@@ -338,7 +319,7 @@ class FlyApp:
 class SettingsWindow(tk.Toplevel):
     def __init__(self,master,profiles,on_saved):
         super().__init__(master)
-        self.title("FLY - Node / App Settings"); self.geometry("720x620")
+        self.title("FLY - 节点 / 应用设置"); self.geometry("720x620")
         ensure_private_files(PATHS)
         src=load_node_source(PATHS); app=load_app_settings(PATHS)
         self.on_saved=on_saved
@@ -351,30 +332,30 @@ class SettingsWindow(tk.Toplevel):
         self.exe_vars={r["id"]:tk.StringVar(value=str(exes.get(r["id"],""))) for r in self.tun_profiles}
 
         f=ttk.Frame(self,padding=14); f.pack(fill="both",expand=True)
-        box=ttk.LabelFrame(f,text="Your node source",padding=10); box.pack(fill="x")
-        ttk.Radiobutton(box,text="Local private\\nodes.yaml",variable=self.mode,value="file").pack(anchor="w")
-        ttk.Radiobutton(box,text="Clash/Mihomo subscription URL",variable=self.mode,value="subscription").pack(anchor="w",pady=(8,0))
+        box=ttk.LabelFrame(f,text="你的节点来源",padding=10); box.pack(fill="x")
+        ttk.Radiobutton(box,text="本地 private\\nodes.yaml",variable=self.mode,value="file").pack(anchor="w")
+        ttk.Radiobutton(box,text="Clash/Mihomo 订阅 URL",variable=self.mode,value="subscription").pack(anchor="w",pady=(8,0))
         ttk.Entry(box,textvariable=self.url).pack(fill="x",pady=(7,0))
-        ttk.Button(box,text="Open nodes.yaml",command=lambda:os.startfile(str(PATHS.nodes_yaml))).pack(anchor="w",pady=(10,0))
+        ttk.Button(box,text="打开 nodes.yaml",command=lambda:os.startfile(str(PATHS.nodes_yaml))).pack(anchor="w",pady=(10,0))
 
-        auto=ttk.LabelFrame(f,text="Automatic / Advanced selection",padding=10); auto.pack(fill="x",pady=(12,0))
-        ttk.Label(auto,text="FLY only filters nodes labelled Japan/JPN/JP/日本/Tokyo/Osaka. Service-specific latency targets come from the selected profiles.",wraplength=650).pack(anchor="w")
+        auto=ttk.LabelFrame(f,text="日本节点自动选择",padding=10); auto.pack(fill="x",pady=(12,0))
+        ttk.Label(auto,text="只筛选名称含 Japan / JPN / JP / 日本 / Tokyo / Osaka / 🇯🇵 的节点；选线测速目标来自所选配置的 latency_test_urls，日常保活检测使用轻量端点。",wraplength=650).pack(anchor="w")
         rr=ttk.Frame(auto); rr.pack(fill="x",pady=(10,0))
-        ttk.Label(rr,text="Timeout (ms)").pack(side="left"); ttk.Entry(rr,textvariable=self.timeout,width=10).pack(side="left",padx=(8,18))
-        ttk.Label(rr,text="Keep last node if ≤").pack(side="left"); ttk.Entry(rr,textvariable=self.sticky,width=10).pack(side="left",padx=(8,4)); ttk.Label(rr,text="ms").pack(side="left")
+        ttk.Label(rr,text="超时 (ms)").pack(side="left"); ttk.Entry(rr,textvariable=self.timeout,width=10).pack(side="left",padx=(8,18))
+        ttk.Label(rr,text="延迟不超过").pack(side="left"); ttk.Entry(rr,textvariable=self.sticky,width=10).pack(side="left",padx=(8,4)); ttk.Label(rr,text="ms 时沿用上次节点").pack(side="left")
 
         if self.tun_profiles:
-            nk=ttk.LabelFrame(f,text="Optional executable override for TUN profiles",padding=10)
+            nk=ttk.LabelFrame(f,text="TUN 配置的可执行文件（可选，仅用于按进程名分流，不会自动启动游戏）",padding=10)
             nk.pack(fill="x",pady=(12,0))
             for r in self.tun_profiles:
                 rr=ttk.Frame(nk); rr.pack(fill="x",pady=(0,6))
                 ttk.Label(rr,text=r["name"],width=22).pack(side="left")
                 ttk.Entry(rr,textvariable=self.exe_vars[r["id"]]).pack(side="left",fill="x",expand=True)
-                ttk.Button(rr,text="Browse...",command=lambda pid=r["id"]:self.browse(pid)).pack(side="left",padx=(8,0))
+                ttk.Button(rr,text="浏览...",command=lambda pid=r["id"]:self.browse(pid)).pack(side="left",padx=(8,0))
 
-        ttk.Label(f,text="Credentials stay in private/ and are excluded from Git. FLY does not provide nodes, accounts, membership or VPS service.",
+        ttk.Label(f,text="订阅 URL、UUID 等凭据只保存在本机 private\\ 目录，已被 Git 排除。FLY 不提供节点、账号、会员或 VPS 服务。",
                   wraplength=670).pack(anchor="w",pady=(14,0))
-        ttk.Button(f,text="Save",command=self.save).pack(anchor="e",pady=(14,0))
+        ttk.Button(f,text="保存",command=self.save).pack(anchor="e",pady=(14,0))
 
     def browse(self,pid):
         p=filedialog.askopenfilename(filetypes=[("Windows executable","*.exe"),("All files","*.*")])
@@ -385,7 +366,7 @@ class SettingsWindow(tk.Toplevel):
             timeout=int(self.timeout.get().strip()); sticky=int(self.sticky.get().strip())
             if timeout<1000 or sticky<100: raise ValueError
         except ValueError:
-            messagebox.showerror("FLY","Use valid timeout/sticky values."); return
+            messagebox.showerror("FLY","请输入有效数值：超时 ≥1000ms，沿用阈值 ≥100ms。"); return
         save_json(PATHS.node_source,{"mode":self.mode.get(),"subscription_url":self.url.get().strip()})
         app=load_app_settings(PATHS)
         exes=app.get("game_exes",{})
@@ -395,7 +376,7 @@ class SettingsWindow(tk.Toplevel):
         app["latency_timeout_ms"]=timeout
         app["sticky_max_delay_ms"]=sticky
         save_json(PATHS.app_settings,app)
-        self.on_saved(); messagebox.showinfo("FLY","Settings saved."); self.destroy()
+        self.on_saved(); messagebox.showinfo("FLY","设置已保存。"); self.destroy()
 
 class CustomProfilesWindow(tk.Toplevel):
     TEMPLATE = {
@@ -414,35 +395,35 @@ class CustomProfilesWindow(tk.Toplevel):
     }
     def __init__(self,master,on_saved):
         super().__init__(master)
-        self.title("FLY - Local custom profiles"); self.geometry("780x650")
+        self.title("FLY - 本地自定义配置"); self.geometry("780x650")
         self.on_saved=on_saved
         f=ttk.Frame(self,padding=12); f.pack(fill="both",expand=True)
-        ttk.Label(f,text="Local JSON profile editor",font=("Segoe UI",13,"bold")).pack(anchor="w")
-        ttk.Label(f,text="This file is private/custom_profiles.json and is never committed. Use domains/processes/IP/ports only for traffic you explicitly want to proxy.",wraplength=740).pack(anchor="w",pady=(4,8))
+        ttk.Label(f,text="本地 JSON 配置编辑器",font=("Segoe UI",13,"bold")).pack(anchor="w")
+        ttk.Label(f,text="内容保存在 private\\custom_profiles.json，永远不会被提交。domains / processes / ip_cidrs / ports 只写你明确要代理的流量；注意 ports 是全系统级按端口匹配（如填 443 等于全部 HTTPS），请谨慎使用。",wraplength=740).pack(anchor="w",pady=(4,8))
         self.text=tk.Text(f,wrap="none",font=("Consolas",10))
         self.text.pack(fill="both",expand=True)
         current={"profiles":[{k:v for k,v in p.items() if k!="source"} for p in load_custom_profiles(PATHS)]}
         if not current["profiles"]: current=self.TEMPLATE
         self.text.insert("1.0",json.dumps(current,ensure_ascii=False,indent=2))
         row=ttk.Frame(f); row.pack(fill="x",pady=(8,0))
-        ttk.Button(row,text="Save local profiles",command=self.save).pack(side="right")
+        ttk.Button(row,text="保存本地配置",command=self.save).pack(side="right")
 
     def save(self):
         try:
             data=json.loads(self.text.get("1.0","end"))
             if not isinstance(data,dict) or not isinstance(data.get("profiles"),list):
-                raise ValueError("Top level must contain a profiles array.")
+                raise ValueError("顶层必须包含 profiles 数组。")
             ids=set()
             for p in data["profiles"]:
-                if not isinstance(p,dict): raise ValueError("Every profile must be an object.")
+                if not isinstance(p,dict): raise ValueError("每个配置必须是对象。")
                 pid=str(p.get("id","")).strip(); name=str(p.get("name","")).strip()
-                if not pid or not name: raise ValueError("Every profile needs id and name.")
-                if pid in ids: raise ValueError(f"Duplicate profile id: {pid}")
+                if not pid or not name: raise ValueError("每个配置都需要 id 和 name。")
+                if pid in ids: raise ValueError(f"配置 id 重复：{pid}")
                 ids.add(pid)
             save_custom_profiles(PATHS,data["profiles"])
         except Exception as e:
-            messagebox.showerror("FLY",f"Invalid profile JSON:\n{e}"); return
-        self.on_saved(); messagebox.showinfo("FLY","Custom profiles saved locally."); self.destroy()
+            messagebox.showerror("FLY",f"配置 JSON 无效：\n{e}"); return
+        self.on_saved(); messagebox.showinfo("FLY","自定义配置已保存到本机。"); self.destroy()
 
 def main():
     ensure_private_files(PATHS)
@@ -466,5 +447,5 @@ if __name__=="__main__":
         except OSError: pass
         try:
             r=tk.Tk(); r.withdraw()
-            messagebox.showerror("FLY",f"Startup failed (see runtime\\error.log):\n\n{err[-1500:]}")
+            messagebox.showerror("FLY",f"启动失败（详情见 runtime\\error.log）：\n\n{err[-1500:]}")
         except Exception: pass

@@ -26,7 +26,6 @@ class Paths:
 DEFAULT_NODE_SOURCE = {"mode": "file", "subscription_url": ""}
 DEFAULT_APP_SETTINGS = {
     "game_exes": {},
-    "routing_mode": "automatic",
     "browser": "auto",
     "mixed_port": 17890,
     "controller_port": 19090,
@@ -87,9 +86,6 @@ def load_app_settings(paths):
     if not str(data.get("api_secret", "")).strip():
         data["api_secret"] = secrets.token_hex(16)
         changed = True
-    if str(data.get("routing_mode", "automatic")).lower() not in {"automatic","advanced","custom"}:
-        data["routing_mode"] = "automatic"
-        changed = True
     if changed:
         save_json(paths.app_settings, data)
     return data
@@ -109,7 +105,9 @@ def _normalize_profile(rule, source="builtin"):
         r[key] = [str(x).strip() for x in value if str(x).strip()]
     if r.get("latency_test_url") and not r["latency_test_urls"]:
         r["latency_test_urls"] = [str(r["latency_test_url"]).strip()]
-    r.pop("full_browser", None)
+    # full_browser is an explicit, clearly-labelled opt-in: only a profile that
+    # declares it (and gets checked by the user) routes all browser traffic.
+    r["full_browser"] = bool(r.get("full_browser"))
     return r
 
 def load_custom_profiles(paths):
@@ -130,7 +128,6 @@ def save_custom_profiles(paths, profiles):
             continue
         p = dict(item)
         p.pop("source", None)
-        p.pop("full_browser", None)
         if str(p.get("id","")).strip() and str(p.get("name","")).strip():
             cleaned.append(p)
     save_json(paths.custom_profiles, {"profiles": cleaned})
@@ -166,15 +163,15 @@ def node_source_is_configured(paths):
     if mode == "subscription":
         url = str(src.get("subscription_url","")).strip()
         return (url.startswith("http://") or url.startswith("https://"),
-                "Subscription URL" if url else "Subscription URL is empty")
+                "订阅 URL" if url else "订阅 URL 为空")
     if mode != "file":
-        return False, f"Unknown node mode: {mode}"
+        return False, f"未知的节点来源：{mode}"
     if not paths.nodes_yaml.exists():
-        return False, "nodes.yaml not found"
+        return False, "未找到 nodes.yaml"
     text = paths.nodes_yaml.read_text(encoding="utf-8", errors="replace")
     active = [x for x in text.splitlines() if x.strip() and not x.lstrip().startswith("#")]
     ok = any(x.strip()=="proxies:" for x in active) and any(x.lstrip().startswith("- name:") for x in active)
-    return (True, "Local nodes.yaml") if ok else (False, "Paste a node into private\\nodes.yaml")
+    return (True, "本地 nodes.yaml") if ok else (False, "请把节点粘贴到 private\\nodes.yaml")
 
 def copy_local_provider(paths, runtime_home):
     pdir = runtime_home / "provider"

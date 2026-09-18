@@ -63,7 +63,8 @@ def looks_like_japan(name, keywords=None):
 
 class JapanNodeSelector:
     def __init__(self, api, log, keywords=None, test_urls=None,
-                 test_url="https://www.gstatic.com/generate_204", timeout_ms=5000):
+                 test_url="https://www.gstatic.com/generate_204", timeout_ms=5000,
+                 light_url="https://www.gstatic.com/generate_204"):
         self.api, self.log = api, log
         self.keywords = keywords
         urls = test_urls or [test_url]
@@ -71,6 +72,9 @@ class JapanNodeSelector:
         if not self.test_urls:
             self.test_urls = ["https://www.gstatic.com/generate_204"]
         self.test_url = self.test_urls[0]
+        # Lightweight endpoint for liveness/sticky checks: heavy service pages
+        # inflate delay numbers and would churn the sticky threshold.
+        self.light_url = str(light_url or "https://www.gstatic.com/generate_204").strip()
         self.timeout_ms = int(timeout_ms)
 
     def candidates(self, group="FLY-JP"):
@@ -115,6 +119,10 @@ class JapanNodeSelector:
             raise MihomoApiError("; ".join(errors) or "All latency targets failed")
         return max(delays)
 
+    def measure_light(self, node):
+        """Cheap liveness probe against the generic endpoint only."""
+        return self.api.delay(node, self.light_url, self.timeout_ms)
+
     def _measure(self, node):
         try:
             return node, self.measure(node), None
@@ -125,7 +133,7 @@ class JapanNodeSelector:
         nodes = self.wait_for_candidates(group, wait_s)
         if preferred and preferred in nodes:
             try:
-                d = self.measure(preferred)
+                d = self.measure_light(preferred)
                 if d <= int(sticky_max_delay_ms):
                     self.api.select(preferred, group)
                     now = self.api.get_group(group).get("now")

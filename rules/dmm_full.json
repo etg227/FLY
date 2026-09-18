@@ -1,0 +1,20 @@
+{
+  "id": "dmm_full",
+  "name": "DMM / FANZA 页游（整浏览器）",
+  "category": "Platforms",
+  "sort": 31,
+  "launch_mode": "browser",
+  "full_browser": true,
+  "url": "https://games.dmm.com/",
+  "domains": [
+    "dmm.com",
+    "dmm.co.jp"
+  ],
+  "keywords": [],
+  "ip_cidrs": [],
+  "processes": [],
+  "ports": [],
+  "latency_test_urls": [
+    "https://games.dmm.com/"
+  ]
+}
