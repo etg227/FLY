@@ -1,13 +1,13 @@
 {
   "id": "dmm",
-  "name": "DMM GAMES",
+  "name": "DMM / FANZA 全游戏",
   "sort": 30,
   "launch_mode": "browser",
+  "full_browser": true,
   "url": "https://games.dmm.com/",
   "domains": [
     "dmm.com",
-    "dmm.co.jp",
-    "dmmgames.com"
+    "dmm.co.jp"
   ],
   "processes": []
 }

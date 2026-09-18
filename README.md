@@ -49,9 +49,12 @@
   "domains": ["example.jp"],
   "keywords": ["可选，按关键词匹配域名（抓 CDN）"],
   "ip_cidrs": ["可选，1.2.3.0/24"],
-  "processes": ["可选，game.exe（TUN 模式）"]
+  "processes": ["可选，game.exe（TUN 模式）"],
+  "full_browser": false
 }
 ```
+
+`full_browser: true`（如 DMM / FANZA 入口）表示该模式下**浏览器全部流量**走日本节点 —— 用于游戏本体从各厂商自己服务器加载、域名无法穷举的平台型站点。此时不走系统代理的程序（含 TUN 游戏分流）不受影响，但浏览器里逛别的网站也会经过日本节点，玩完记得停止加速。
 
 欢迎提 PR 补充游戏规则。
 

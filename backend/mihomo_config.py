@@ -175,6 +175,12 @@ def build_runtime_config(paths: Paths, game_ids):
     for c in cidrs:
         lines.append(f"  - IP-CIDR,{c},FLY-JP,no-resolve")
 
+    # full_browser games (DMM/FANZA portals) load each title from its maker's
+    # own servers — unenumerable domains. Route everything that arrived via the
+    # mixed port (= all system-proxy/browser traffic) to Japan instead.
+    if any(bool(r.get("full_browser")) for r in rules):
+        lines.append(f"  - IN-PORT,{mixed},FLY-JP")
+
     lines.append("  - MATCH,DIRECT")
     lines.append("")
 
