@@ -21,11 +21,11 @@
 
 ## 安装
 
-**推荐方式（什么都不用装）**：从 [Releases](../../releases/latest) 下载 `launcher.exe`，放进一个**空文件夹**运行。它会自动完成：
+**推荐方式（什么都不用装）**：从 [Releases](../../releases/latest) 下载 `launcher.exe`，放进一个**空文件夹**运行。它是图形界面（无黑窗），会自动完成：
 
 1. 检测不到 Python 时，自动从国内镜像下载并静默安装（约 26MB，仅当前用户，无需管理员权限）
 2. 从本仓库拉取最新程序文件（GitHub 打不开时自动走镜像站）
-3. 启动 FLY
+3. 以无窗口方式启动 FLY（主程序背后没有 cmd；排查问题请用 `START_FLY_DEBUG.bat`，崩溃信息也会写入 `runtime\error.log`）
 
 之后在界面里点 **Install / Update Core** 下载 mihomo 内核，在 **Node / App Settings** 填入你的订阅 URL，勾选游戏，点「一键加速」。
 

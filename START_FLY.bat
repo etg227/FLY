@@ -1,5 +1,16 @@
 @echo off
+rem Starts FLY without a lingering console window (pythonw).
 cd /d "%~dp0"
+where pyw >nul 2>nul
+if %errorlevel%==0 (
+  start "" pyw -3 main.py
+  goto :eof
+)
+where pythonw >nul 2>nul
+if %errorlevel%==0 (
+  start "" pythonw main.py
+  goto :eof
+)
 where py >nul 2>nul
 if %errorlevel%==0 (
   py -3 main.py
@@ -12,7 +23,6 @@ if %errorlevel%==0 (
   if errorlevel 1 pause
   goto :eof
 )
-echo [FLY] Python not found. Please install Python 3.11+ ...
-echo [FLY] and tick "Add python.exe to PATH" during setup.
-echo [FLY] Download: https://www.python.org/downloads/
+echo [FLY] Python not found. Run launcher.exe instead - it installs Python automatically.
+echo [FLY] Or install Python 3.11+ manually: https://www.python.org/downloads/
 pause

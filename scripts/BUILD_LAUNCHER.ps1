@@ -9,7 +9,7 @@ if ($LASTEXITCODE -ne 0) {
   if ($LASTEXITCODE -ne 0) { throw "pip install pyinstaller failed." }
 }
 
-py -3 -m PyInstaller --onefile --console --name launcher launcher.py
+py -3 -m PyInstaller --onefile --noconsole --name launcher launcher.py
 if ($LASTEXITCODE -ne 0) { throw "PyInstaller build failed." }
 
 Write-Host ""

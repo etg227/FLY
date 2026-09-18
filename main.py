@@ -309,4 +309,19 @@ def main():
     initial=[g.strip() for g in f"{args.games},{args.game}".split(",") if g.strip()]
     root=tk.Tk(); FlyApp(root,initial,args.autostart); root.mainloop()
 
-if __name__=="__main__": main()
+if __name__=="__main__":
+    try:
+        main()
+    except Exception:
+        # Running windowless under pythonw: no console to die into, so keep
+        # the traceback somewhere visible.
+        import traceback
+        err=traceback.format_exc()
+        try:
+            PATHS.runtime.mkdir(parents=True,exist_ok=True)
+            (PATHS.runtime/"error.log").write_text(err,encoding="utf-8")
+        except OSError: pass
+        try:
+            r=tk.Tk(); r.withdraw()
+            messagebox.showerror("FLY",f"启动失败（详情见 runtime\\error.log）：\n\n{err[-1500:]}")
+        except Exception: pass

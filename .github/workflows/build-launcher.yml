@@ -19,7 +19,7 @@ jobs:
       - name: Build launcher.exe
         run: |
           pip install pyinstaller
-          pyinstaller --onefile --console --name launcher launcher.py
+          pyinstaller --onefile --noconsole --name launcher launcher.py
       - name: Attach to release
         uses: softprops/action-gh-release@v2
         with:

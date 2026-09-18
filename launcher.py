@@ -1,12 +1,15 @@
-"""FLY launcher: checks GitHub for a newer version, updates the code in place,
-then starts the app. User data (private/, core/, runtime/) is never touched,
-and any update failure falls back to launching the currently installed version.
+"""FLY launcher (GUI): checks GitHub for a newer version, updates the code in
+place, auto-installs Python when missing, then starts the app windowless.
+User data (private/, core/, runtime/) is never touched; every error stays
+visible in the window instead of a flashing console.
 
-Build launcher.exe with scripts/BUILD_LAUNCHER.ps1, or just run LAUNCHER.bat.
+Build launcher.exe with scripts/BUILD_LAUNCHER.ps1 (PyInstaller --noconsole).
 """
 from __future__ import annotations
-import io, os, shutil, subprocess, sys, tempfile, time, urllib.request, webbrowser, zipfile
+import io, os, queue, shutil, subprocess, sys, tempfile, threading, urllib.request, webbrowser, zipfile
 from pathlib import Path
+import tkinter as tk
+from tkinter import ttk
 
 OWNER = "etg227"
 REPO = "FLY"
@@ -29,32 +32,42 @@ def app_dir() -> Path:
         return Path(sys.executable).resolve().parent
     return Path(__file__).resolve().parent
 
-def fetch(url: str) -> bytes:
+def fetch(url: str, ui=None) -> bytes:
     last = None
     for m in MIRRORS:
         try:
             req = urllib.request.Request(m + url, headers={"User-Agent": f"{REPO}-launcher"})
             with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
-                return resp.read()
+                total = int(resp.headers.get("Content-Length") or 0)
+                buf, done = io.BytesIO(), 0
+                while True:
+                    chunk = resp.read(256 * 1024)
+                    if not chunk:
+                        break
+                    buf.write(chunk)
+                    done += len(chunk)
+                    if ui and total:
+                        ui.progress(done / total)
+                return buf.getvalue()
         except Exception as e:
-            print(f"  {'直连' if not m else '镜像 ' + m} 失败：{e}")
+            if ui:
+                ui.log(f"{'直连' if not m else '镜像 ' + m.split('/')[2]} 失败：{e}")
             last = e
     raise last
 
 def local_version(root: Path) -> str:
     try:
-        return (root / "VERSION").read_text(encoding="utf-8").strip()
+        return (root / "VERSION").read_text(encoding="utf-8-sig").strip()
     except OSError:
         return "0"
 
-def remote_version() -> str:
+def remote_version(ui=None) -> str:
     url = f"https://raw.githubusercontent.com/{OWNER}/{REPO}/{BRANCH}/VERSION"
-    return fetch(url).decode("utf-8", errors="replace").strip()
+    return fetch(url, ui).decode("utf-8-sig", errors="replace").strip()
 
-def apply_update(root: Path):
+def apply_update(root: Path, ui):
     url = f"https://codeload.github.com/{OWNER}/{REPO}/zip/refs/heads/{BRANCH}"
-    print("正在下载更新包...")
-    data = fetch(url)
+    data = fetch(url, ui)
     with tempfile.TemporaryDirectory(prefix="fly-update-") as td:
         tdir = Path(td)
         with zipfile.ZipFile(io.BytesIO(data)) as zf:
@@ -70,7 +83,6 @@ def apply_update(root: Path):
             else:
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(src, dst)
-    print("更新完成。")
 
 def find_python():
     py = shutil.which("py")
@@ -93,121 +105,157 @@ def find_python():
                 return [str(exe)]
     return None
 
-def download_file(url: str, dst: Path):
-    req = urllib.request.Request(url, headers={"User-Agent": f"{REPO}-launcher"})
-    with urllib.request.urlopen(req, timeout=30) as resp, open(dst, "wb") as f:
-        total = int(resp.headers.get("Content-Length") or 0)
-        done, last_pct = 0, -10
-        while True:
-            chunk = resp.read(256 * 1024)
-            if not chunk:
-                break
-            f.write(chunk)
-            done += len(chunk)
-            if total:
-                pct = done * 100 // total
-                if pct >= last_pct + 10:
-                    last_pct = pct
-                    print(f"  下载中 {pct}%  ({done // 1048576}MB / {total // 1048576}MB)")
+def windowless(python_cmd):
+    """Swap py.exe/python.exe for their windowless siblings when available."""
+    exe = Path(python_cmd[0])
+    alt = {"py.exe": "pyw.exe", "python.exe": "pythonw.exe"}.get(exe.name.lower())
+    if alt:
+        cand = exe.with_name(alt)
+        if cand.exists():
+            return [str(cand)] + python_cmd[1:], True
+    return list(python_cmd), False
 
-def install_python():
-    print()
-    print(f"未检测到 Python，开始自动下载 Python {PYTHON_VERSION}（约 27MB，安装到当前用户，无需管理员权限）...")
+def install_python(ui):
+    ui.status(f"正在下载 Python {PYTHON_VERSION}（约 26MB）...")
+    ui.log("未检测到 Python，自动下载安装（仅当前用户，无需管理员权限）。")
     tmp = Path(tempfile.mkdtemp(prefix="fly-python-"))
     exe = tmp / f"python-{PYTHON_VERSION}-amd64.exe"
-    ok = False
+    data = None
     for url in PYTHON_URLS:
         try:
-            print(f"  从 {url.split('/')[2]} 下载...")
-            download_file(url, exe)
-            ok = True
+            ui.log(f"从 {url.split('/')[2]} 下载...")
+            data = fetch(url, ui)
             break
         except Exception as e:
-            print(f"  失败：{e}")
-    if not ok:
+            ui.log(f"失败：{e}")
+    if data is None:
         return None
-    print("正在静默安装 Python（约 1-2 分钟，请勿关闭窗口）...")
+    exe.write_bytes(data)
+    ui.status("正在安装 Python（约 1-2 分钟，请勿关闭窗口）...")
+    ui.progress(None)  # indeterminate
     r = subprocess.run([str(exe), "/quiet", "InstallAllUsers=0", "PrependPath=1",
                         "Include_launcher=1", "InstallLauncherAllUsers=0",
                         "Include_tcltk=1", "Include_test=0", "Include_doc=0",
                         "Include_dev=0", "Include_idle=0", "Include_pip=0",
-                        "AssociateFiles=0", "Shortcuts=0"], timeout=900)
+                        "AssociateFiles=0", "Shortcuts=0"],
+                       timeout=900, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     if r.returncode != 0:
-        print(f"安装程序返回错误码 {r.returncode}。")
+        ui.log(f"安装程序返回错误码 {r.returncode}。")
         return None
     py = find_python()
     if py:
-        print("Python 安装完成。")
+        ui.log("Python 安装完成。")
     return py
 
-def ensure_python():
+def run_flow(root: Path, ui):
+    """Update + environment check. Returns the python command to launch with."""
+    ui.status("检查更新...")
+    cur = local_version(root)
+    remote = None
+    try:
+        remote = remote_version(ui)
+    except Exception as e:
+        ui.log(f"检查更新失败：{e}")
+    if remote and remote != cur:
+        ui.status(f"发现新版本 {remote}，正在更新...")
+        apply_update(root, ui)
+        ui.log(f"已更新：{cur} → {remote}")
+    elif remote:
+        ui.log(f"已是最新版本（{remote}）。")
+    if not (root / "main.py").exists():
+        raise RuntimeError("未能获取程序文件。首次运行需要能访问 GitHub 或镜像站，请检查网络后重试。")
+
+    ui.status("检查运行环境...")
+    ui.progress(None)
     py = find_python()
-    if py:
-        return py
-    try:
-        py = install_python()
-    except Exception as e:
-        print(f"自动安装 Python 出错：{e}")
-        py = None
-    if py:
-        return py
-    print()
-    print('自动安装失败。请手动安装 Python 3.11+（安装时勾选 "Add python.exe to PATH"）后重新运行本程序。')
-    print("下载地址: https://www.python.org/downloads/")
-    try:
-        webbrowser.open("https://www.python.org/downloads/")
-    except Exception:
-        pass
-    return None
+    if not py:
+        py = install_python(ui)
+    if not py:
+        try:
+            webbrowser.open("https://www.python.org/downloads/")
+        except Exception:
+            pass
+        raise RuntimeError('自动安装 Python 失败。已打开官网下载页，请手动安装'
+                           '（勾选 "Add python.exe to PATH"）后重新运行本程序。')
+    return py
 
-def pause(msg="按回车键退出..."):
-    try:
-        input(msg)
-    except EOFError:
-        pass
+def launch(root: Path, python_cmd):
+    cmd, ok = windowless(python_cmd)
+    flags = 0 if ok else getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    subprocess.Popen(cmd + [str(root / "main.py")], cwd=str(root), creationflags=flags)
 
-def launch(root: Path) -> bool:
-    python = ensure_python()
-    if not python:
-        pause()
-        return False
-    main_py = root / "main.py"
-    if not main_py.exists():
-        print("未找到程序文件（main.py）。首次运行需要联网从 GitHub 拉取，请检查网络后重试。")
-        pause()
-        return False
-    print("启动 FLY...")
-    # `|| pause` keeps the console open if the app fails to start, so errors
-    # are visible instead of a flash-and-close window.
-    inner = subprocess.list2cmdline(python + [str(main_py)]) + " || pause"
-    subprocess.Popen(f'cmd /c "{inner}"', cwd=str(root),
-                     creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0))
-    return True
+class LauncherApp(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title("FLY 启动器")
+        self.geometry("440x300")
+        self.resizable(False, False)
+        self.q = queue.Queue()
 
-def main():
-    root = app_dir()
-    print(f"FLY launcher — 当前版本 {local_version(root)}")
-    try:
-        remote = remote_version()
-        cur = local_version(root)
-        if remote and remote != cur:
-            print(f"发现新版本 {remote}（当前 {cur}），开始更新...")
-            apply_update(root)
-        else:
-            print("已是最新版本。")
-    except Exception as e:
-        print(f"检查更新失败：{e}")
-        if not (root / "main.py").exists():
-            print("首次运行需要能访问 GitHub（或镜像站）下载程序文件，请换个网络环境再试。")
-            pause()
-            return
-        print("跳过更新，直接启动当前版本。")
-    if launch(root):
-        time.sleep(2)
+        f = ttk.Frame(self, padding=16)
+        f.pack(fill="both", expand=True)
+        ttk.Label(f, text="FLY", font=("Segoe UI", 16, "bold")).pack(anchor="w")
+        self.status_lbl = ttk.Label(f, text="准备中...", font=("Segoe UI", 10))
+        self.status_lbl.pack(anchor="w", pady=(6, 4))
+        self.bar = ttk.Progressbar(f, mode="indeterminate")
+        self.bar.pack(fill="x", pady=(0, 8))
+        self.bar.start(12)
+        self.logbox = tk.Text(f, height=8, font=("Segoe UI", 9), state="disabled", relief="flat",
+                              background=self.cget("background"))
+        self.logbox.pack(fill="both", expand=True)
+        self.exit_btn = ttk.Button(f, text="退出", command=self.destroy)
+
+        threading.Thread(target=self.worker, daemon=True).start()
+        self.after(100, self.poll)
+
+    # ---- worker-side callbacks (thread-safe via queue) ----
+    def status(self, s): self.q.put(("status", s))
+    def progress(self, frac): self.q.put(("progress", frac))
+    def log(self, s): self.q.put(("log", s))
+
+    def worker(self):
+        root = app_dir()
+        try:
+            py = run_flow(root, self)
+            self.status("启动 FLY...")
+            launch(root, py)
+            self.q.put(("done", None))
+        except Exception as e:
+            self.q.put(("error", str(e)))
+
+    # ---- UI-side ----
+    def poll(self):
+        try:
+            while True:
+                kind, val = self.q.get_nowait()
+                if kind == "status":
+                    self.status_lbl.configure(text=val)
+                elif kind == "progress":
+                    if val is None:
+                        self.bar.configure(mode="indeterminate"); self.bar.start(12)
+                    else:
+                        self.bar.stop(); self.bar.configure(mode="determinate", value=val * 100)
+                elif kind == "log":
+                    self._append(val)
+                elif kind == "done":
+                    self.bar.stop(); self.bar.configure(mode="determinate", value=100)
+                    self.status_lbl.configure(text="启动完成 ✓")
+                    self.after(1500, self.destroy)
+                    return
+                elif kind == "error":
+                    self.bar.stop()
+                    self.status_lbl.configure(text="出错了")
+                    self._append("[错误] " + val)
+                    self.exit_btn.pack(anchor="e", pady=(8, 0))
+        except queue.Empty:
+            pass
+        self.after(100, self.poll)
+
+    def _append(self, s):
+        self.logbox.configure(state="normal")
+        self.logbox.insert("end", s + "\n")
+        self.logbox.see("end")
+        self.logbox.configure(state="disabled")
 
 if __name__ == "__main__":
-    try:
-        main()
-    except Exception as e:
-        print(f"[launcher] 未处理的错误：{e}")
-        pause()
+    LauncherApp().mainloop()
