@@ -28,8 +28,8 @@ class FlyApp:
         self.root = root
         self.version = app_version(PATHS)
         self.root.title(f"FLY v{self.version} - Selective Routing")
-        self.root.geometry("900x760")
-        self.root.minsize(820, 680)
+        self.root.geometry("900x820")
+        self.root.minsize(820, 720)
 
         self.logs = queue.Queue()
         self.core = CoreManager(PATHS, self.log)

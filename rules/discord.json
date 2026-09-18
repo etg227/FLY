@@ -1,0 +1,24 @@
+{
+  "id": "discord",
+  "name": "Discord",
+  "category": "Services",
+  "sort": 64,
+  "launch_mode": "tun",
+  "url": "",
+  "domains": [
+    "discord.com",
+    "discord.gg",
+    "discordapp.com",
+    "discordapp.net",
+    "discord.media"
+  ],
+  "keywords": [],
+  "ip_cidrs": [],
+  "processes": [
+    "Discord.exe"
+  ],
+  "ports": [],
+  "latency_test_urls": [
+    "https://discord.com/robots.txt"
+  ]
+}
