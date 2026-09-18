@@ -30,6 +30,7 @@ class FlyApp:
         self.selector = None
         self.sysproxy_active = False
         self._watch_stop = None
+        self._core_installing = False
 
         self.rules = list_game_rules(PATHS)
         self.rule_by_id = {r["id"]: r for r in self.rules}
@@ -67,12 +68,9 @@ class FlyApp:
             row = ttk.Frame(back); row.pack(fill="x", pady=(0 if i==0 else 8,0))
             ttk.Label(row,text=label,width=14).pack(side="left")
             ttk.Label(row,textvariable=var,font=("Segoe UI",10,"bold") if i==2 else None).pack(side="left")
-            if i==0:
-                self.core_btn=ttk.Button(row,text="Install / Update Core",command=self.install_core)
-                self.core_btn.pack(side="right")
-            elif i==1:
+            if i==1:
                 ttk.Button(row,text="Node / App Settings",command=self.open_settings).pack(side="right")
-            else:
+            elif i==2:
                 ttk.Label(row,text="Latency:").pack(side="left", padx=(18,4))
                 ttk.Label(row,textvariable=self.delay_var).pack(side="left")
 
@@ -112,7 +110,13 @@ class FlyApp:
         self.root.after(100,self.flush_logs)
 
     def refresh_status(self):
-        self.core_var.set("Ready" if PATHS.core_exe.exists() else "Missing")
+        if PATHS.core_exe.exists():
+            self.core_var.set("Ready")
+        elif self._core_installing:
+            self.core_var.set("Downloading...")
+        else:
+            self.core_var.set("Missing")
+            self._ensure_core()
         ok,detail=node_source_is_configured(PATHS)
         self.source_var.set(f"Ready ({detail})" if ok else f"Not configured ({detail})")
 
@@ -129,19 +133,21 @@ class FlyApp:
             timeout_ms=int(s.get("latency_timeout_ms",5000))
         )
 
-    def install_core(self):
-        if self.core.is_running():
-            messagebox.showwarning("FLY","请先停止加速再更新内核。"); return
-        self.core_btn.configure(state="disabled")
+    def _ensure_core(self):
+        # Fallback for when the launcher's core download did not finish; the
+        # user never installs the core manually.
+        if PATHS.core_exe.exists() or self._core_installing: return
+        self._core_installing=True
+        self.refresh_status()
+        self.log("[CORE] 未检测到加速内核，自动下载中...")
         def work():
             try:
                 download_core(PATHS,self.log)
             except Exception as e:
-                self.log(f"[CORE] 安装失败：{e}")
-                self.root.after(0,lambda:messagebox.showerror("FLY",f"内核安装失败：{e}"))
+                self.log(f"[CORE] 自动下载失败：{e}（点“刷新状态”或重启程序会自动重试）")
             finally:
+                self._core_installing=False
                 self.root.after(0,self.refresh_status)
-                self.root.after(0,lambda:self.core_btn.configure(state="normal"))
         threading.Thread(target=work,daemon=True).start()
 
     def open_settings(self): SettingsWindow(self.root,self.rules,self.refresh_status)
@@ -151,7 +157,8 @@ class FlyApp:
         if not selected:
             messagebox.showwarning("FLY","请至少勾选一个游戏。"); return
         if not PATHS.core_exe.exists():
-            messagebox.showwarning("FLY","Mihomo core 尚未安装。"); return
+            self._ensure_core()
+            messagebox.showinfo("FLY","加速内核正在自动下载（进度见日志），完成后再点一键加速。"); return
         ok,_=node_source_is_configured(PATHS)
         if not ok:
             messagebox.showwarning("FLY","节点/订阅尚未配置。"); return

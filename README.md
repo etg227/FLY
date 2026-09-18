@@ -25,9 +25,10 @@
 
 1. 可视化检查/拉取本仓库的最新程序文件（GitHub 打不开时自动走镜像站）
 2. 检测不到 Python 时，自动从国内镜像下载并静默安装（约 26MB，仅当前用户，无需管理员权限）
-3. 以无窗口方式自动启动 FLY
+3. 首次自动下载 mihomo 加速内核（约 21MB，同样带镜像回退；万一没下完，主程序会自动重试）
+4. 以无窗口方式自动启动 FLY
 
-首次使用在界面里点 **Install / Update Core** 下载 mihomo 内核（进度显示在日志区，无弹窗），在 **Node / App Settings** 填入你的订阅 URL，勾选游戏，点「一键加速」。
+首次使用只需在 **Node / App Settings** 里填入你的订阅 URL，勾选游戏，点「一键加速」。想强制更新内核：删除 `core\mihomo.exe` 后重新启动即可自动拉取最新版。
 
 排查问题：崩溃信息写入 `runtime\error.log`；需要看实时控制台日志时用 `START_FLY_DEBUG.bat`。
 
@@ -72,4 +73,4 @@
 
 ## License
 
-代码以 [MIT](LICENSE) 协议开源。内核 mihomo 遵循其自身的 GPL-3.0 协议，请通过 `INSTALL_CORE.bat` 自行下载，勿随本项目二次分发。
+代码以 [MIT](LICENSE) 协议开源。内核 mihomo 遵循其自身的 GPL-3.0 协议，由程序在用户本机从其官方 Release 自动下载，不随本项目二次分发。

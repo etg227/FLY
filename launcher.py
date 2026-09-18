@@ -6,7 +6,7 @@ visible in the window instead of a flashing console.
 Build launcher.exe with scripts/BUILD_LAUNCHER.ps1 (PyInstaller --noconsole).
 """
 from __future__ import annotations
-import io, os, queue, shutil, subprocess, sys, tempfile, threading, urllib.request, webbrowser, zipfile
+import io, json, os, queue, re, shutil, subprocess, sys, tempfile, threading, urllib.request, webbrowser, zipfile
 from pathlib import Path
 import tkinter as tk
 from tkinter import ttk
@@ -159,6 +159,34 @@ def install_python(ui):
         ui.log("Python 安装完成。")
     return py
 
+CORE_API = "https://api.github.com/repos/MetaCubeX/mihomo/releases/latest"
+CORE_PATTERNS = (r"^mihomo-windows-amd64-v1-v[0-9].*\.zip$", r"^mihomo-windows-amd64.*\.zip$")
+
+def ensure_core(root: Path, ui):
+    """First run: fetch the mihomo core so the user never installs anything."""
+    core = root / "core" / "mihomo.exe"
+    if core.exists():
+        return
+    ui.status("下载加速内核（首次，约 21MB）...")
+    ui.progress(None)
+    data = json.loads(fetch(CORE_API, ui).decode("utf-8", errors="replace"))
+    asset = None
+    for pat in CORE_PATTERNS:
+        asset = next((a for a in data.get("assets", []) if re.match(pat, a.get("name", ""))), None)
+        if asset:
+            break
+    if not asset:
+        raise RuntimeError("未找到 mihomo 内核安装包。")
+    ui.log(f"下载 {asset['name']} ...")
+    blob = fetch(asset["browser_download_url"], ui)
+    with zipfile.ZipFile(io.BytesIO(blob)) as zf:
+        name = next((n for n in zf.namelist() if re.search(r"mihomo.*\.exe$", n)), None)
+        if not name:
+            raise RuntimeError("安装包里没有 mihomo.exe。")
+        core.parent.mkdir(parents=True, exist_ok=True)
+        core.write_bytes(zf.read(name))
+    ui.log("加速内核安装完成。")
+
 def run_flow(root: Path, ui):
     """Update + environment check. Returns the python command to launch with."""
     ui.status("检查更新...")
@@ -189,6 +217,11 @@ def run_flow(root: Path, ui):
             pass
         raise RuntimeError('自动安装 Python 失败。已打开官网下载页，请手动安装'
                            '（勾选 "Add python.exe to PATH"）后重新运行本程序。')
+    try:
+        ensure_core(root, ui)
+    except Exception as e:
+        # Not fatal: the app retries the core download by itself on startup.
+        ui.log(f"内核下载未完成（{e}），主程序会自动重试。")
     return py
 
 def launch(root: Path, python_cmd):
