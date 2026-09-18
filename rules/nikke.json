@@ -1,6 +1,7 @@
 {
   "id": "nikke",
   "name": "NIKKE",
+  "category": "Games",
   "sort": 50,
   "launch_mode": "tun",
   "url": "",
@@ -8,7 +9,13 @@
     "nikke-en.com",
     "nikke-jp.com"
   ],
+  "keywords": [],
+  "ip_cidrs": [],
   "processes": [
     "nikke.exe"
+  ],
+  "ports": [],
+  "latency_test_urls": [
+    "https://nikke-jp.com/"
   ]
 }

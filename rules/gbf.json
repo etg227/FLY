@@ -1,6 +1,7 @@
 {
   "id": "gbf",
   "name": "Granblue Fantasy",
+  "category": "Games",
   "sort": 10,
   "launch_mode": "browser",
   "url": "https://game.granbluefantasy.jp/",
@@ -12,5 +13,10 @@
   "keywords": [
     "granbluefantasy"
   ],
-  "processes": []
+  "ip_cidrs": [],
+  "processes": [],
+  "ports": [],
+  "latency_test_urls": [
+    "https://game.granbluefantasy.jp/"
+  ]
 }

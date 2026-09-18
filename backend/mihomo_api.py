@@ -62,9 +62,16 @@ def looks_like_japan(name, keywords=None):
     return False
 
 class JapanNodeSelector:
-    def __init__(self, api, log, keywords=None, test_url="https://www.gstatic.com/generate_204", timeout_ms=5000):
+    def __init__(self, api, log, keywords=None, test_urls=None,
+                 test_url="https://www.gstatic.com/generate_204", timeout_ms=5000):
         self.api, self.log = api, log
-        self.keywords, self.test_url, self.timeout_ms = keywords, test_url, int(timeout_ms)
+        self.keywords = keywords
+        urls = test_urls or [test_url]
+        self.test_urls = list(dict.fromkeys(str(x).strip() for x in urls if str(x).strip()))
+        if not self.test_urls:
+            self.test_urls = ["https://www.gstatic.com/generate_204"]
+        self.test_url = self.test_urls[0]
+        self.timeout_ms = int(timeout_ms)
 
     def candidates(self, group="FLY-JP"):
         data = self.api.get_group(group)
@@ -76,7 +83,6 @@ class JapanNodeSelector:
         return out
 
     def wait_for_candidates(self, group="FLY-JP", wait_s=45):
-        """The first subscription download can take a while; poll instead of failing fast."""
         deadline = time.time() + wait_s
         waiting_logged = False
         while True:
@@ -98,19 +104,28 @@ class JapanNodeSelector:
                 waiting_logged = True
             time.sleep(2)
 
+    def measure(self, node):
+        delays, errors = [], []
+        for url in self.test_urls:
+            try:
+                delays.append(self.api.delay(node, url, self.timeout_ms))
+            except Exception as e:
+                errors.append(f"{url}: {e}")
+        if not delays:
+            raise MihomoApiError("; ".join(errors) or "All latency targets failed")
+        return max(delays)
+
     def _measure(self, node):
         try:
-            return node, self.api.delay(node, self.test_url, self.timeout_ms), None
+            return node, self.measure(node), None
         except Exception as e:
             return node, None, str(e)
 
     def auto_select(self, group="FLY-JP", wait_s=45, preferred=None, sticky_max_delay_ms=1000):
         nodes = self.wait_for_candidates(group, wait_s)
-        # Sticky exit IP: reuse the last node whenever it is still usable, so
-        # the platform sees a stable address instead of a new one every start.
         if preferred and preferred in nodes:
             try:
-                d = self.api.delay(preferred, self.test_url, self.timeout_ms)
+                d = self.measure(preferred)
                 if d <= int(sticky_max_delay_ms):
                     self.api.select(preferred, group)
                     now = self.api.get_group(group).get("now")
@@ -122,7 +137,7 @@ class JapanNodeSelector:
             except Exception as e:
                 self.log(f"[JP] Last node unavailable ({e}); re-selecting.")
 
-        self.log(f"[JP] Found {len(nodes)} Japan candidate(s).")
+        self.log(f"[JP] Found {len(nodes)} Japan candidate(s); testing {len(self.test_urls)} target(s).")
         results = []
         with ThreadPoolExecutor(max_workers=min(6, len(nodes))) as pool:
             futs = [pool.submit(self._measure, n) for n in nodes]
@@ -145,7 +160,6 @@ class JapanNodeSelector:
         now = self.api.get_group(group).get("now")
         if now != chosen:
             raise MihomoApiError(f"Switch failed: expected {chosen!r}, got {now!r}")
-
         self.log(f"[JP SELECT] {chosen}" + (f" ({delay} ms)" if delay is not None else ""))
         return chosen, delay
 
@@ -159,7 +173,7 @@ class JapanNodeSelector:
         chosen = nodes[idx]
         self.api.select(chosen, group)
         try:
-            delay = self.api.delay(chosen, self.test_url, self.timeout_ms)
+            delay = self.measure(chosen)
         except Exception:
             delay = None
         self.log(f"[JP SWITCH] {current or '(none)'} -> {chosen}" + (f" ({delay} ms)" if delay else ""))

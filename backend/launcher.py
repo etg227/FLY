@@ -1,14 +1,15 @@
-from .config import load_game_rule
+from .config import load_profile_rule
 
-def log_hints(paths, game_ids, log):
-    """Acceleration only sets up routing — nothing is opened or launched.
-    Just tell the user where each game lives."""
-    for gid in game_ids:
-        rule = load_game_rule(paths, gid)
-        name = rule.get("name", gid)
+def log_hints(paths, profile_ids, log):
+    """Routing setup does not launch third-party apps; only show relevant entry hints."""
+    for pid in profile_ids:
+        rule = load_profile_rule(paths, pid)
+        name = rule.get("name", pid)
         mode = str(rule.get("launch_mode", "browser")).lower()
-        if mode == "browser":
-            url = str(rule.get("url", "")).strip()
-            log(f"[READY] {name}: 在浏览器打开 {url}" if url else f"[READY] {name}")
+        url = str(rule.get("url", "")).strip()
+        if mode == "browser" and url:
+            log(f"[READY] {name}: open {url}")
+        elif mode == "browser":
+            log(f"[READY] {name}: domain routing is active.")
         else:
-            log(f"[READY] {name}: TUN 分流已生效，自行启动游戏即可。")
+            log(f"[READY] {name}: TUN/process routing is active; start the app normally.")
