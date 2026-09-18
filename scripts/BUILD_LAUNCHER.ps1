@@ -10,10 +10,13 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 py -3 -m PyInstaller --onefile --noconsole --name launcher launcher.py
-if ($LASTEXITCODE -ne 0) { throw "PyInstaller build failed." }
+if ($LASTEXITCODE -ne 0) { throw "launcher build failed." }
+py -3 -m PyInstaller --onefile --noconsole --name FLY start_fly.py
+if ($LASTEXITCODE -ne 0) { throw "FLY build failed." }
 
 Write-Host ""
-Write-Host "Built: $ProjectRoot\dist\launcher.exe" -ForegroundColor Green
-Write-Host "Upload it to a GitHub Release, e.g.:"
-Write-Host "  gh release create vX.Y.Z dist\launcher.exe --title ""FLY vX.Y.Z"""
+Write-Host "Built: $ProjectRoot\dist\launcher.exe (install & update)" -ForegroundColor Green
+Write-Host "Built: $ProjectRoot\dist\FLY.exe (daily direct start)" -ForegroundColor Green
+Write-Host "Upload both to a GitHub Release, e.g.:"
+Write-Host "  gh release create vX.Y.Z dist\launcher.exe dist\FLY.exe --title ""FLY vX.Y.Z"""
 Read-Host "Press Enter to close"
