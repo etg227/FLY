@@ -68,6 +68,7 @@ class FlyApp:
         self.log(f"FLY v{self.version} 就绪。")
         self.log("安全原则：只有命中所选配置的流量走 FLY-JP，其余一律 DIRECT。")
         self.sysproxy.restore_orphan()
+        threading.Thread(target=self.core.cleanup_orphans,daemon=True).start()
         if autostart:
             self.log("[FLY] Autostart requested (admin relaunch).")
             self.root.after(600, self.start_accel)
