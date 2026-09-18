@@ -1,34 +1,30 @@
 from pathlib import Path
-from .config import Paths, copy_local_provider, load_app_settings, load_game_rule, load_node_source
+from .config import Paths, copy_local_provider, load_app_settings, load_node_source, load_profile_rule
 
 def q(v): return "'" + str(v).replace("'", "''") + "'"
 
-# Domains that must resolve to their real IP even in fake-ip mode, otherwise
-# Windows connectivity checks, NTP and LAN discovery misbehave under TUN.
 FAKE_IP_FILTER = [
-    "*.lan",
-    "*.local",
-    "+.msftconnecttest.com",
-    "+.msftncsi.com",
-    "time.windows.com",
-    "+.pool.ntp.org",
-    "+.ntp.org",
-    "+.qq.com",
-    "+.steamserver.net",
+    "*.lan", "*.local", "+.msftconnecttest.com", "+.msftncsi.com",
+    "time.windows.com", "+.pool.ntp.org", "+.ntp.org",
+    "+.qq.com", "+.steamserver.net",
 ]
-
-# Domestic-first DNS: the DoH-only setup from v0.3 (1.1.1.1 / dns.google)
-# is unreachable from a mainland network without a proxy, which broke both
-# DIRECT traffic and the initial subscription download.
 DNS_NAMESERVERS = ["223.5.5.5", "119.29.29.29", "https://doh.pub/dns-query"]
 DNS_BOOTSTRAP = ["223.5.5.5", "119.29.29.29"]
 
-def build_runtime_config(paths: Paths, game_ids):
-    """game_ids: one id or a list of ids — all selected games share one core,
-    their rules are merged so several games accelerate at the same time."""
-    if isinstance(game_ids, str):
-        game_ids = [game_ids]
-    rules = [load_game_rule(paths, g) for g in game_ids]
+def _dedup(items):
+    out, seen = [], set()
+    for x in items:
+        s = str(x).strip()
+        if s and s.lower() not in seen:
+            seen.add(s.lower()); out.append(s)
+    return out
+
+def build_runtime_config(paths: Paths, profile_ids):
+    """Build one Mihomo instance for any number of routing profiles.
+    Safety invariant: every unmatched flow ends at MATCH,DIRECT."""
+    if isinstance(profile_ids, str):
+        profile_ids = [profile_ids]
+    profiles = [load_profile_rule(paths, p) for p in profile_ids]
     settings = load_app_settings(paths)
     source = load_node_source(paths)
     home = paths.runtime / "mihomo"
@@ -37,7 +33,20 @@ def build_runtime_config(paths: Paths, game_ids):
     mixed = int(settings.get("mixed_port",17890))
     ctrl = int(settings.get("controller_port",19090))
     secret = str(settings.get("api_secret","")).strip()
-    tun_mode = any(str(r.get("launch_mode","browser")).lower() == "tun" for r in rules)
+
+    configured_processes = []
+    for pid, profile in zip(profile_ids, profiles):
+        exe = str(settings.get("game_exes", {}).get(pid, "")).strip()
+        if exe:
+            configured_processes.append(Path(exe).name)
+        configured_processes.extend(profile.get("processes", []))
+    processes = _dedup(configured_processes)
+    domains = _dedup(str(d).lower().lstrip("*.") for p in profiles for d in p.get("domains", []))
+    keywords = _dedup(str(k).lower() for p in profiles for k in p.get("keywords", []))
+    cidrs = _dedup(c for p in profiles for c in p.get("ip_cidrs", []))
+    ports = _dedup(p for profile in profiles for p in profile.get("ports", []))
+
+    tun_mode = bool(processes) or any(str(p.get("launch_mode","browser")).lower()=="tun" for p in profiles)
 
     lines = [
         f"mixed-port: {mixed}",
@@ -84,8 +93,6 @@ def build_runtime_config(paths: Paths, game_ids):
             "  dns-hijack:",
             "    - any:53",
             "",
-            # Sniff SNI so processes that connect by raw IP still hit the
-            # domain rules correctly under TUN.
             "sniffer:",
             "  enable: true",
             "  sniff:",
@@ -100,7 +107,6 @@ def build_runtime_config(paths: Paths, game_ids):
 
     mode = str(source.get("mode","file")).strip().lower()
     lines += ["proxy-providers:", "  USER:"]
-
     if mode == "subscription":
         lines += [
             "    type: http",
@@ -118,8 +124,6 @@ def build_runtime_config(paths: Paths, game_ids):
         "      url: https://www.gstatic.com/generate_204",
         "      interval: 300",
         "      timeout: 5000",
-        # lazy: the app runs its own latency tests on the Japan candidates,
-        # so there is no need to probe every node in the subscription.
         "      lazy: true",
         "",
         "proxy-groups:",
@@ -131,30 +135,6 @@ def build_runtime_config(paths: Paths, game_ids):
         "rules:",
     ]
 
-    def dedup(items):
-        out, seen = [], set()
-        for x in items:
-            if x and x.lower() not in seen:
-                seen.add(x.lower()); out.append(x)
-        return out
-
-    processes = []
-    for gid, rule in zip(game_ids, rules):
-        exe = str(settings.get("game_exes", {}).get(gid, "")).strip()
-        if exe:
-            name = Path(exe).name
-            if name:
-                processes.append(name)
-        processes.extend(str(p).strip() for p in rule.get("processes", []))
-    processes = dedup(processes)
-
-    domains = dedup([str(d).strip().lower().lstrip("*.") for r in rules for d in r.get("domains", [])])
-    keywords = dedup([str(k).strip().lower() for r in rules for k in r.get("keywords", [])])
-    cidrs = dedup([str(c).strip() for r in rules for c in r.get("ip_cidrs", [])])
-
-    # Under TUN, QUIC (UDP 443) to game hosts would bypass or hang on nodes with
-    # broken UDP; rejecting it forces a clean TCP fallback through the proxy.
-    # Placed BEFORE the routing rules so it wins the match.
     if tun_mode:
         for d in domains:
             lines.append(f"  - AND,((NETWORK,udp),(DST-PORT,443),(DOMAIN-SUFFIX,{d})),REJECT")
@@ -163,23 +143,14 @@ def build_runtime_config(paths: Paths, game_ids):
 
     for proc in processes:
         lines.append(f"  - PROCESS-NAME,{proc},FLY-JP")
-
     for d in domains:
         lines.append(f"  - DOMAIN-SUFFIX,{d},FLY-JP")
-
-    # DOMAIN-KEYWORD catches CDN hosts such as prd-game-a-granbluefantasy.akamaized.net
-    # that DOMAIN-SUFFIX cannot express.
     for k in keywords:
         lines.append(f"  - DOMAIN-KEYWORD,{k},FLY-JP")
-
     for c in cidrs:
         lines.append(f"  - IP-CIDR,{c},FLY-JP,no-resolve")
-
-    # full_browser games (DMM/FANZA portals) load each title from its maker's
-    # own servers — unenumerable domains. Route everything that arrived via the
-    # mixed port (= all system-proxy/browser traffic) to Japan instead.
-    if any(bool(r.get("full_browser")) for r in rules):
-        lines.append(f"  - IN-PORT,{mixed},FLY-JP")
+    for port in ports:
+        lines.append(f"  - DST-PORT,{port},FLY-JP")
 
     lines.append("  - MATCH,DIRECT")
     lines.append("")
