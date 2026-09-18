@@ -1,7 +1,8 @@
 from __future__ import annotations
-import json, secrets, shutil
+import json, re, secrets, shutil
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlparse
 
 @dataclass
 class Paths:
@@ -15,8 +16,6 @@ class Paths:
     @property
     def rules(self): return self.app / "rules"
     @property
-    def optional(self): return self.app / "optional"
-    @property
     def node_source(self): return self.private / "node_source.json"
     @property
     def nodes_yaml(self): return self.private / "nodes.yaml"
@@ -29,7 +28,6 @@ DEFAULT_NODE_SOURCE = {"mode": "file", "subscription_url": ""}
 DEFAULT_APP_SETTINGS = {
     "game_exes": {},
     "services_enabled": True,
-    "enabled_optional": [],
     "browser": "auto",
     "mixed_port": 17890,
     "controller_port": 19090,
@@ -100,8 +98,7 @@ def _normalize_profile(rule, source="builtin"):
     r["name"] = str(r.get("name", r["id"])).strip()
     r["source"] = source
     r.setdefault("sort", 99)
-    default_category = {"builtin": "Games", "optional": "Optional"}.get(source, "Custom")
-    r.setdefault("category", default_category)
+    r.setdefault("category", "Games" if source == "builtin" else "Custom")
     r.setdefault("launch_mode", "browser")
     for key in ("domains","keywords","ip_cidrs","processes","ports","latency_test_urls"):
         value = r.get(key, [])
@@ -140,20 +137,43 @@ def save_custom_profiles(paths, profiles):
             cleaned.append(p)
     save_json(paths.custom_profiles, {"profiles": cleaned})
 
-def list_optional_profiles(paths):
-    """The opt-in library: shipped with the repo but only loaded into the main
-    list for users who enabled them (settings key enabled_optional)."""
-    out = []
-    if paths.optional.exists():
-        for f in sorted(paths.optional.glob("*.json")):
-            try:
-                rule = json.loads(f.read_text(encoding="utf-8"))
-            except Exception:
-                continue
-            p = _normalize_profile(rule, "optional")
-            if p["id"] and p["name"]:
-                out.append(p)
-    return out
+# Heuristic public-suffix handling for common two-level TLDs (co.jp, com.cn...).
+_COMMON_SLD = {"co","com","net","org","gov","edu","ac","go","or","ne"}
+
+def registrable_domain(host):
+    host = str(host).strip().lower().strip(".")
+    labels = [x for x in host.split(".") if x]
+    if len(labels) >= 3 and labels[-2] in _COMMON_SLD and len(labels[-1]) <= 3:
+        return ".".join(labels[-3:])
+    if len(labels) >= 2:
+        return ".".join(labels[-2:])
+    return host
+
+def profile_from_url(raw_url, name=""):
+    """Turn a pasted URL (or bare domain) into a browser routing profile."""
+    raw = str(raw_url).strip()
+    if not raw:
+        raise ValueError("网址不能为空。")
+    if "://" not in raw:
+        raw = "https://" + raw
+    host = (urlparse(raw).hostname or "").strip().lower()
+    if not host or "." not in host:
+        raise ValueError("无法从输入中解析出域名。")
+    domain = registrable_domain(host)
+    pid = re.sub(r"[^a-z0-9]+", "-", domain).strip("-")
+    return {
+        "id": pid,
+        "name": str(name).strip() or domain,
+        "category": "Custom",
+        "launch_mode": "browser",
+        "url": f"https://{host}/",
+        "domains": [domain],
+        "keywords": [],
+        "ip_cidrs": [],
+        "processes": [],
+        "ports": [],
+        "latency_test_urls": [f"https://{host}/"],
+    }
 
 def list_routing_profiles(paths):
     profiles = []
@@ -165,8 +185,6 @@ def list_routing_profiles(paths):
         p = _normalize_profile(rule, "builtin")
         if p["id"] and p["name"]:
             profiles.append(p)
-    enabled = {str(x) for x in load_app_settings(paths).get("enabled_optional", [])}
-    profiles.extend(p for p in list_optional_profiles(paths) if p["id"] in enabled)
     profiles.extend(load_custom_profiles(paths))
     by_id = {p["id"]: p for p in profiles}
     profiles = list(by_id.values())

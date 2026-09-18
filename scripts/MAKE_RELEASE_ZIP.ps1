@@ -8,7 +8,7 @@ $Staging = Join-Path $env:TEMP ("fly-release-" + [guid]::NewGuid().ToString("N")
 
 $Include = @("main.py", "launcher.py", "README.md", "LICENSE", "VERSION",
              "START_FLY_DEBUG.bat", ".gitignore")
-$IncludeDirs = @("backend", "rules", "optional", "scripts")
+$IncludeDirs = @("backend", "rules", "scripts")
 
 New-Item -ItemType Directory -Force -Path $Staging | Out-Null
 foreach ($f in $Include) {

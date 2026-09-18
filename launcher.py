@@ -97,7 +97,8 @@ def _safe_extract_update(data: bytes, expected_sha: str, root: Path, ui):
     ui.log("更新包 SHA-256 校验通过。")
 
 OBSOLETE = ["START_FLY.bat","LAUNCHER.bat","INSTALL_CORE.bat","start_fly.py",
-            "FLY.exe","launcher.spec","FLY.spec","scripts/INSTALL_CORE.ps1"]
+            "FLY.exe","launcher.spec","FLY.spec","scripts/INSTALL_CORE.ps1",
+            "optional/wnacg.json","optional/gdmusic.json","optional/annas.json"]
 
 def apply_release_update(root: Path, assets, ui):
     zip_url = assets.get(UPDATE_ASSET)

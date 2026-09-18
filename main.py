@@ -5,7 +5,7 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
 from backend.config import (
-    Paths, ensure_private_files, list_routing_profiles, list_optional_profiles,
+    Paths, ensure_private_files, list_routing_profiles, profile_from_url,
     load_app_settings, load_node_source, load_custom_profiles, save_custom_profiles,
     node_source_is_configured, save_json, app_version
 )
@@ -94,9 +94,8 @@ class FlyApp:
                                            text="默认加速常用服务")
         self.services_cb.pack(anchor="w", pady=(8,0))
         actions = ttk.Frame(prof); actions.pack(fill="x", pady=(8,0))
-        ttk.Button(actions,text="可选配置库...",command=self.open_optional_library).pack(side="left")
-        ttk.Button(actions,text="编辑本地自定义配置",command=self.open_custom_editor).pack(side="left",padx=(8,0))
-        ttk.Label(actions,text="小众需求在可选库里按需启用；自定义配置只存本机 private\\。").pack(side="left", padx=(10,0))
+        ttk.Button(actions,text="添加/管理加速网站...",command=self.open_custom_sites).pack(side="left")
+        ttk.Label(actions,text="填个网址就能加自己的加速项，只保存在本机 private\\。").pack(side="left", padx=(10,0))
 
         buttons = ttk.Frame(outer); buttons.pack(fill="x",pady=(2,12))
         self.start_btn = ttk.Button(buttons,text="一键加速",command=self.start_accel); self.start_btn.pack(side="left")
@@ -137,7 +136,7 @@ class FlyApp:
             pid = profile["id"]
             var = tk.BooleanVar(value=pid in initial)
             self.profile_vars[pid] = var
-            source = {"custom":"自定义","optional":"可选"}.get(profile.get("source"),"")
+            source = "自定义" if profile.get("source")=="custom" else ""
             mode = "TUN" if _needs_tun(profile) else "域名"
             if profile.get("full_browser"):
                 mode = "整浏览器"
@@ -216,11 +215,8 @@ class FlyApp:
     def open_settings(self):
         SettingsWindow(self.root,self.profiles,self.refresh_status)
 
-    def open_custom_editor(self):
-        CustomProfilesWindow(self.root, self._custom_saved)
-
-    def open_optional_library(self):
-        OptionalLibraryWindow(self.root, self._custom_saved)
+    def open_custom_sites(self):
+        CustomSitesWindow(self.root, self._custom_saved)
 
     def _custom_saved(self):
         self.reload_profiles(first=False)
@@ -410,35 +406,75 @@ class SettingsWindow(tk.Toplevel):
         save_json(PATHS.app_settings,app)
         self.on_saved(); messagebox.showinfo("FLY","设置已保存。"); self.destroy()
 
-class OptionalLibraryWindow(tk.Toplevel):
+class CustomSitesWindow(tk.Toplevel):
     def __init__(self,master,on_saved):
         super().__init__(master)
-        self.title("FLY - 可选配置库"); self.geometry("560x480")
+        self.title("FLY - 添加/管理加速网站"); self.geometry("640x520")
         self.on_saved=on_saved
-        self.items=list_optional_profiles(PATHS)
-        enabled={str(x) for x in load_app_settings(PATHS).get("enabled_optional",[])}
-        self.vars={p["id"]:tk.BooleanVar(value=p["id"] in enabled) for p in self.items}
 
         f=ttk.Frame(self,padding=14); f.pack(fill="both",expand=True)
-        ttk.Label(f,text="可选配置库",font=("Segoe UI",13,"bold")).pack(anchor="w")
-        ttk.Label(f,text="这里是不属于所有人的独立需求配置：勾选后加入主界面的分流列表，随程序更新自动维护；不勾选则完全不加载。",
-                  wraplength=520).pack(anchor="w",pady=(4,10))
-        listf=ttk.Frame(f); listf.pack(fill="both",expand=True)
-        if not self.items:
-            ttk.Label(listf,text="（当前没有可选配置，欢迎往 optional\\ 目录提 PR）").pack(anchor="w")
-        for p in self.items:
-            row=ttk.Frame(listf); row.pack(fill="x",pady=3)
-            ttk.Checkbutton(row,text=p["name"],variable=self.vars[p["id"]]).pack(side="left")
-            ttk.Label(row,text=" / ".join(p.get("domains",[])[:3]),foreground="#888").pack(side="left",padx=(10,0))
-        ttk.Label(f,text="内容站点由第三方运营，与本项目无关；请遵守所在地法律与站点条款。",
-                  wraplength=520).pack(anchor="w",pady=(10,0))
-        ttk.Button(f,text="保存",command=self.save).pack(anchor="e",pady=(10,0))
+        ttk.Label(f,text="添加要加速的网站",font=("Segoe UI",13,"bold")).pack(anchor="w")
+        ttk.Label(f,text="粘贴网址（或直接填域名），自动生成分流配置并出现在主界面列表；只保存在本机，不会上传。",
+                  wraplength=600).pack(anchor="w",pady=(4,8))
 
-    def save(self):
-        app=load_app_settings(PATHS)
-        app["enabled_optional"]=[pid for pid,var in self.vars.items() if var.get()]
-        save_json(PATHS.app_settings,app)
-        self.on_saved(); self.destroy()
+        form=ttk.Frame(f); form.pack(fill="x")
+        ttk.Label(form,text="网址").pack(side="left")
+        self.url_var=tk.StringVar()
+        ttk.Entry(form,textvariable=self.url_var).pack(side="left",fill="x",expand=True,padx=(8,12))
+        ttk.Label(form,text="名称(可选)").pack(side="left")
+        self.name_var=tk.StringVar()
+        ttk.Entry(form,textvariable=self.name_var,width=16).pack(side="left",padx=(8,12))
+        ttk.Button(form,text="添加",command=self.add_site).pack(side="left")
+
+        ttk.Label(f,text="我的加速网站：",font=("Segoe UI",10,"bold")).pack(anchor="w",pady=(14,4))
+        self.listf=ttk.Frame(f); self.listf.pack(fill="both",expand=True)
+        self.refresh_list()
+
+        bottom=ttk.Frame(f); bottom.pack(fill="x",pady=(10,0))
+        ttk.Label(bottom,text="站点由第三方运营，请遵守所在地法律与站点条款。",foreground="#888").pack(side="left")
+        ttk.Button(bottom,text="高级编辑 (JSON)...",command=self.open_json_editor).pack(side="right")
+
+    def refresh_list(self):
+        for child in self.listf.winfo_children():
+            child.destroy()
+        self.customs=load_custom_profiles(PATHS)
+        if not self.customs:
+            ttk.Label(self.listf,text="（还没有添加过网站）",foreground="#888").pack(anchor="w")
+        for p in self.customs:
+            row=ttk.Frame(self.listf); row.pack(fill="x",pady=2)
+            ttk.Label(row,text=p["name"],width=24).pack(side="left")
+            ttk.Label(row,text=" / ".join(p.get("domains",[])[:3]),foreground="#888").pack(side="left",padx=(6,0))
+            ttk.Button(row,text="删除",width=6,
+                       command=lambda pid=p["id"],name=p["name"]:self.remove_site(pid,name)).pack(side="right")
+
+    def add_site(self):
+        try:
+            profile=profile_from_url(self.url_var.get(),self.name_var.get())
+        except Exception as e:
+            messagebox.showerror("FLY",str(e),parent=self); return
+        existing=load_custom_profiles(PATHS)
+        taken={p["id"] for p in list_routing_profiles(PATHS)}
+        pid=profile["id"]; n=2
+        while profile["id"] in taken:
+            profile["id"]=f"{pid}-{n}"; n+=1
+        cleaned=[{k:v for k,v in p.items() if k!="source"} for p in existing]
+        cleaned.append(profile)
+        save_custom_profiles(PATHS,cleaned)
+        self.url_var.set(""); self.name_var.set("")
+        self.refresh_list(); self.on_saved()
+
+    def remove_site(self,pid,name):
+        if not messagebox.askyesno("FLY",f"删除「{name}」？",parent=self): return
+        cleaned=[{k:v for k,v in p.items() if k!="source"}
+                 for p in load_custom_profiles(PATHS) if p["id"]!=pid]
+        save_custom_profiles(PATHS,cleaned)
+        self.refresh_list(); self.on_saved()
+
+    def open_json_editor(self):
+        CustomProfilesWindow(self,self._json_saved)
+
+    def _json_saved(self):
+        self.refresh_list(); self.on_saved()
 
 class CustomProfilesWindow(tk.Toplevel):
     TEMPLATE = {
