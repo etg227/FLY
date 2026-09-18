@@ -65,6 +65,11 @@ def remote_version(ui=None) -> str:
     url = f"https://raw.githubusercontent.com/{OWNER}/{REPO}/{BRANCH}/VERSION"
     return fetch(url, ui).decode("utf-8-sig", errors="replace").strip()
 
+# Files from older versions that updates no longer ship — removed so the
+# user's folder stays clean (single-exe experience).
+OBSOLETE = ["START_FLY.bat", "LAUNCHER.bat", "INSTALL_CORE.bat", "start_fly.py",
+            "FLY.exe", "launcher.spec", "FLY.spec", "scripts/INSTALL_CORE.ps1"]
+
 def apply_update(root: Path, ui):
     url = f"https://codeload.github.com/{OWNER}/{REPO}/zip/refs/heads/{BRANCH}"
     data = fetch(url, ui)
@@ -83,6 +88,13 @@ def apply_update(root: Path, ui):
             else:
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(src, dst)
+    for name in OBSOLETE:
+        try:
+            p = root / name
+            if p.is_file():
+                p.unlink()
+        except OSError:
+            pass
 
 def find_python():
     py = shutil.which("py")

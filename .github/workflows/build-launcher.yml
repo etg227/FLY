@@ -16,14 +16,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Build launcher.exe and FLY.exe
+      - name: Build launcher.exe
         run: |
           pip install pyinstaller
           pyinstaller --onefile --noconsole --name launcher launcher.py
-          pyinstaller --onefile --noconsole --name FLY start_fly.py
       - name: Attach to release
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            dist/launcher.exe
-            dist/FLY.exe
+          files: dist/launcher.exe

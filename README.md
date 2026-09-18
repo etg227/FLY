@@ -21,20 +21,17 @@
 
 ## 安装
 
-**推荐方式（什么都不用装）**：从 [Releases](../../releases/latest) 下载 `launcher.exe` 和 `FLY.exe`，放进同一个**空文件夹**。
+**只需要一个文件**：从 [Releases](../../releases/latest) 下载 `launcher.exe`，放进一个**空文件夹**双击。它是图形界面（全程无黑窗），每次启动自动完成：
 
-- **launcher.exe**：首次安装和更新用 —— 图形界面（无黑窗），自动装环境、拉取最新程序、启动
-- **FLY.exe**：日常启动用 —— 双击直接开（不检查更新，速度快）；想更新时再点 launcher.exe
+1. 可视化检查/拉取本仓库的最新程序文件（GitHub 打不开时自动走镜像站）
+2. 检测不到 Python 时，自动从国内镜像下载并静默安装（约 26MB，仅当前用户，无需管理员权限）
+3. 以无窗口方式自动启动 FLY
 
-launcher.exe 会自动完成：
+首次使用在界面里点 **Install / Update Core** 下载 mihomo 内核（进度显示在日志区，无弹窗），在 **Node / App Settings** 填入你的订阅 URL，勾选游戏，点「一键加速」。
 
-1. 检测不到 Python 时，自动从国内镜像下载并静默安装（约 26MB，仅当前用户，无需管理员权限）
-2. 从本仓库拉取最新程序文件（GitHub 打不开时自动走镜像站）
-3. 以无窗口方式启动 FLY（主程序背后没有 cmd；排查问题请用 `START_FLY_DEBUG.bat`，崩溃信息也会写入 `runtime\error.log`）
+排查问题：崩溃信息写入 `runtime\error.log`；需要看实时控制台日志时用 `START_FLY_DEBUG.bat`。
 
-之后在界面里点 **Install / Update Core** 下载 mihomo 内核，在 **Node / App Settings** 填入你的订阅 URL，勾选游戏，点「一键加速」。
-
-**手动方式**：自装 [Python 3.11+](https://www.python.org/downloads/)（勾选 Add to PATH）→ 下载本仓库 → `INSTALL_CORE.bat` → `START_FLY.bat`。
+**源码方式**：自装 [Python 3.11+](https://www.python.org/downloads/) 后 `pyw main.py`（或 `py -3 launcher.py`）。
 
 ## 自动更新
 

@@ -6,8 +6,8 @@ $OutZip = Join-Path (Split-Path -Parent $ProjectRoot) ($Name + "_release.zip")
 
 # Only ship code + rules. NEVER ship private/ (subscription URL & credentials),
 # runtime/ (downloaded subscription cache, browser profiles) or the 60MB core.
-$Include = @("main.py", "launcher.py", "start_fly.py", "README.md", "LICENSE", "VERSION",
-              "START_FLY.bat", "START_FLY_DEBUG.bat", "LAUNCHER.bat", "INSTALL_CORE.bat", ".gitignore")
+$Include = @("main.py", "launcher.py", "README.md", "LICENSE", "VERSION",
+              "START_FLY_DEBUG.bat", ".gitignore")
 $IncludeDirs = @("backend", "rules", "scripts")
 
 New-Item -ItemType Directory -Force -Path $Staging | Out-Null

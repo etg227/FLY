@@ -6,6 +6,7 @@ from tkinter import ttk, filedialog, messagebox
 
 from backend.config import (Paths, ensure_private_files, list_game_rules, load_app_settings,
                             load_node_source, node_source_is_configured, save_json)
+from backend.core_installer import install_core as download_core
 from backend.core_manager import CoreManager
 from backend.launcher import log_hints
 from backend.mihomo_api import MihomoApi, JapanNodeSelector
@@ -67,7 +68,8 @@ class FlyApp:
             ttk.Label(row,text=label,width=14).pack(side="left")
             ttk.Label(row,textvariable=var,font=("Segoe UI",10,"bold") if i==2 else None).pack(side="left")
             if i==0:
-                ttk.Button(row,text="Install / Update Core",command=self.install_core).pack(side="right")
+                self.core_btn=ttk.Button(row,text="Install / Update Core",command=self.install_core)
+                self.core_btn.pack(side="right")
             elif i==1:
                 ttk.Button(row,text="Node / App Settings",command=self.open_settings).pack(side="right")
             else:
@@ -128,9 +130,19 @@ class FlyApp:
         )
 
     def install_core(self):
-        script=APP_DIR/"scripts"/"INSTALL_CORE.ps1"
-        subprocess.Popen(["powershell.exe","-NoProfile","-ExecutionPolicy","Bypass","-File",str(script)],
-                         cwd=str(APP_DIR),creationflags=getattr(subprocess,"CREATE_NEW_CONSOLE",0))
+        if self.core.is_running():
+            messagebox.showwarning("FLY","请先停止加速再更新内核。"); return
+        self.core_btn.configure(state="disabled")
+        def work():
+            try:
+                download_core(PATHS,self.log)
+            except Exception as e:
+                self.log(f"[CORE] 安装失败：{e}")
+                self.root.after(0,lambda:messagebox.showerror("FLY",f"内核安装失败：{e}"))
+            finally:
+                self.root.after(0,self.refresh_status)
+                self.root.after(0,lambda:self.core_btn.configure(state="normal"))
+        threading.Thread(target=work,daemon=True).start()
 
     def open_settings(self): SettingsWindow(self.root,self.rules,self.refresh_status)
 
