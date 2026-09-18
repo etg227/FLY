@@ -21,11 +21,15 @@
 
 ## 安装
 
-1. 安装 [Python 3.11+](https://www.python.org/downloads/)（勾选 Add to PATH）
-2. 下载本仓库（或从 [Releases](../../releases) 下载 `launcher.exe` 放进任意空文件夹后运行，它会自动拉取最新代码）
-3. 双击 `INSTALL_CORE.bat` 下载 mihomo 内核
-4. 双击 `START_FLY.bat`（或 `launcher.exe` / `LAUNCHER.bat`，会先检查更新再启动）
-5. 在 Node / App Settings 里填入你的订阅 URL，勾选游戏，点「一键加速」
+**推荐方式（什么都不用装）**：从 [Releases](../../releases/latest) 下载 `launcher.exe`，放进一个**空文件夹**运行。它会自动完成：
+
+1. 检测不到 Python 时，自动从国内镜像下载并静默安装（约 26MB，仅当前用户，无需管理员权限）
+2. 从本仓库拉取最新程序文件（GitHub 打不开时自动走镜像站）
+3. 启动 FLY
+
+之后在界面里点 **Install / Update Core** 下载 mihomo 内核，在 **Node / App Settings** 填入你的订阅 URL，勾选游戏，点「一键加速」。
+
+**手动方式**：自装 [Python 3.11+](https://www.python.org/downloads/)（勾选 Add to PATH）→ 下载本仓库 → `INSTALL_CORE.bat` → `START_FLY.bat`。
 
 ## 自动更新
 
