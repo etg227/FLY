@@ -1,76 +1,205 @@
 # FLY
 
-类似岛风Go / ACGP 的**选择性日本游戏加速器**：填入你自己的 Clash/Mihomo 订阅，勾选要玩的游戏，一键加速 —— 只有勾选游戏的流量走日本节点，**其余流量全部走你自己的正常网络**（`MATCH,DIRECT`）。
+**FLY is an open-source selective proxy / policy-based routing frontend for Mihomo.**
 
-内核为 [MetaCubeX/mihomo](https://github.com/MetaCubeX/mihomo)。本项目**不提供任何节点**，需要你自备 Clash 订阅或自有节点。
+It is designed for users who already have their own Clash/Mihomo subscription or self-managed nodes and only want certain region-restricted apps, games or websites to use a Japanese proxy. Everything that does not match an enabled profile stays on the user's normal local network through `MATCH,DIRECT`.
 
-## 特性
+FLY **does not provide proxy nodes, VPS service, membership, accounts, payment, redemption codes or network service**.
 
-- **自选节点来源**：订阅 URL 或本地 `private\nodes.yaml`，凭据只存在你本机，永不上传
-- **自动选线 + 出口稳定**：首次启动筛选日本节点（Japan / JPN / JP / 日本 / Tokyo / Osaka / 🇯🇵）并并行测速选最快；之后**优先沿用上次的节点**，只有它失效或延迟恶化（默认 >1000ms，可在 `app_settings.json` 调 `sticky_max_delay_ms`）才重新选线 —— 出口 IP 保持稳定，避免频繁变换触发平台风控。订阅信息项（剩余流量、到期）不会被误选
-- **多游戏同时加速**：勾选任意组合，规则合并进同一内核
-- **两种加速方式**：
-  - 浏览器游戏（GBF / 艦これ / DMM）：加速期间自动设置系统代理并在停止时还原，用你自己的浏览器直接玩；程序异常退出后下次启动会自动还原残留代理
-  - 客户端游戏（ウマ娘 DMM版 / NIKKE）：TUN + 进程/域名分流，需管理员权限
-- **线路优化**：
-  - 国内优先 DNS（223.5.5.5 / 119.29.29.29 / doh.pub），直连流量不受节点影响
-  - TUN 下 SNI 嗅探，按 IP 直连的游戏进程也能正确命中域名规则
-  - 拦截游戏域名的 QUIC（UDP 443），强制回落 TCP 走代理，避免节点 UDP 不佳时卡顿
-  - 连接保活 + 节点看门狗：运行中每分钟静默检测当前节点，连挂 3 次自动重新测速换线
-- **游戏列表可扩展**：往 `rules\` 丢一个 JSON 就能加游戏，无需改代码
+## Why FLY
 
-## 安装
+A normal proxy client can route traffic, but users often have to understand rule syntax, process matching and TUN behavior. FLY turns that into reusable profiles:
 
-**只需要一个文件**：从 [Releases](../../releases/latest) 下载 `launcher.exe`，放进一个**空文件夹**双击。它是图形界面（全程无黑窗），每次启动自动完成：
+```text
+PC
+└─ FLY / Mihomo
+   ├─ Granblue Fantasy / DMM / selected app -> FLY-JP
+   └─ everything else                     -> DIRECT
+```
 
-1. 可视化检查/拉取本仓库的最新程序文件（GitHub 打不开时自动走镜像站）
-2. 检测不到 Python 时，自动从国内镜像下载并静默安装（约 26MB，仅当前用户，无需管理员权限）
-3. 首次自动下载 mihomo 加速内核（约 21MB，同样带镜像回退；万一没下完，主程序会自动重试）
-4. 以无窗口方式自动启动 FLY
+The goal is **correct selective routing**, not promising that a poor-quality user node will become fast.
 
-首次使用只需在 **Node / App Settings** 里填入你的订阅 URL，勾选游戏，点「一键加速」。想强制更新内核：删除 `core\mihomo.exe` 后重新启动即可自动拉取最新版。
+## v0.8 highlights
 
-排查问题：崩溃信息写入 `runtime\error.log`；需要看实时控制台日志时用 `START_FLY_DEBUG.bat`。
+- **No full-browser proxying**
+  - the old `full_browser` / `IN-PORT` catch-all is removed;
+  - only explicit domain, keyword, IP/CIDR, process or port matches can use `FLY-JP`;
+  - unmatched traffic always falls through to `MATCH,DIRECT`.
+- **General routing profiles**
+  - profiles are no longer conceptually limited to games;
+  - built-in/community profiles live under `rules/`;
+  - private custom profiles live under `private/custom_profiles.json`.
+- **Automatic / Advanced / Custom modes**
+  - **Automatic**: select profiles and let FLY choose a healthy Japanese node;
+  - **Advanced**: use the same safe routing engine with manual node switching and node settings;
+  - **Custom**: create/edit your own local JSON profiles without committing them.
+- **Per-service node tests**
+  - each profile can declare `latency_test_urls`;
+  - when several profiles are selected, FLY tests candidate nodes against those service targets plus a generic fallback;
+  - the conservative worst successful target is used for ranking.
+- **Stable exit**
+  - FLY remembers the last selected node and reuses it while it remains healthy.
+- **Safer updater**
+  - v0.8+ never downloads application code from the mutable `main` branch or a third-party mirror;
+  - updates are discovered from GitHub Releases;
+  - `FLY-update.zip` must have a matching `FLY-update.zip.sha256` release asset;
+  - checksum mismatch or missing checksum causes the update to be skipped;
+  - `private/`, `core/` and `runtime/` are never replaced.
 
-**源码方式**：自装 [Python 3.11+](https://www.python.org/downloads/) 后 `pyw main.py`（或 `py -3 launcher.py`）。
+## Routing selectors
 
-## 自动更新
+A profile may contain any combination of:
 
-`launcher.exe`（源码 `launcher.py`）启动时比对仓库里的 `VERSION`，有新版本就拉取覆盖代码文件；你的 `private\`（订阅等凭据）、`core\`（内核）、`runtime\` 永远不会被更新触碰。更新失败时会直接启动当前版本，不会卡住。
+- `domains`: domain suffixes, e.g. `example.jp`
+- `keywords`: domain keywords, useful for CDN hostnames
+- `ip_cidrs`: destination IP/CIDR ranges
+- `processes`: Windows process names; this enables TUN
+- `ports`: destination ports or port ranges
+- `latency_test_urls`: endpoints used to evaluate candidate Japanese nodes
 
-## 添加新游戏
-
-在 `rules\` 下新建 `<id>.json`：
+Example:
 
 ```json
 {
-  "id": "mygame",
-  "name": "显示名称",
-  "sort": 60,
-  "launch_mode": "browser 或 tun",
-  "url": "浏览器游戏的入口页（日志提示用）",
+  "id": "my-jp-service",
+  "name": "My JP Service",
+  "category": "Custom",
+  "sort": 100,
+  "launch_mode": "browser",
+  "url": "https://example.jp/",
   "domains": ["example.jp"],
-  "keywords": ["可选，按关键词匹配域名（抓 CDN）"],
-  "ip_cidrs": ["可选，1.2.3.0/24"],
-  "processes": ["可选，game.exe（TUN 模式）"],
-  "full_browser": false
+  "keywords": [],
+  "ip_cidrs": [],
+  "processes": [],
+  "ports": [],
+  "latency_test_urls": ["https://example.jp/"]
 }
 ```
 
-`full_browser: true`（如 DMM / FANZA 入口）表示该模式下**浏览器全部流量**走日本节点 —— 用于游戏本体从各厂商自己服务器加载、域名无法穷举的平台型站点。此时不走系统代理的程序（含 TUN 游戏分流）不受影响，但浏览器里逛别的网站也会经过日本节点，玩完记得停止加速。
+Old rule JSON files remain compatible. The legacy `full_browser` field is intentionally ignored from v0.8 onward.
 
-欢迎提 PR 补充游戏规则。
+### Process profiles
 
-## 隐私与安全
+A profile containing `processes` uses Mihomo TUN and requires administrator rights. Process matching intentionally routes that process through the selected proxy group.
 
-- 订阅 URL、节点凭据只保存在本机 `private\` 目录，已被 `.gitignore` 排除
-- 本地打包分享请用 `scripts\MAKE_RELEASE_ZIP.ps1`，它不会把你的凭据打进压缩包
-- mihomo 控制端口仅监听 127.0.0.1 并带随机 secret
+### Domain-only profiles
 
-## 免责声明
+If no selected profile needs TUN, FLY temporarily points the Windows system proxy at the local Mihomo mixed port. This does **not** mean the browser is globally proxied: Mihomo still applies explicit profile rules and sends unmatched requests to `DIRECT`. The previous Windows proxy settings are restored when FLY stops and are also recovered after an abnormal exit.
 
-本项目仅供学习与技术交流，不提供任何网络代理服务；使用者需自备合规的网络环境，并遵守所在地法律法规及相关游戏、平台的服务条款。由使用本项目产生的一切后果由使用者自行承担。
+## Installation
+
+### Release build
+
+Download `launcher.exe` from the latest GitHub Release and place it in an empty folder.
+
+The launcher:
+
+1. checks the latest GitHub Release;
+2. applies an application update only when both `FLY-update.zip` and `FLY-update.zip.sha256` are present and match;
+3. checks Python;
+4. downloads Mihomo from the official MetaCubeX GitHub Release when the core is missing;
+5. starts FLY.
+
+### Source
+
+Install Python 3.11+ and run:
+
+```powershell
+pyw main.py
+```
+
+For debug output:
+
+```powershell
+py -3 main.py
+```
+
+## Node source
+
+FLY uses only nodes supplied by the user:
+
+- a Clash/Mihomo subscription URL; or
+- `private\nodes.yaml`.
+
+Subscription URLs, UUIDs, credentials and local custom profiles are stored under `private/`, which is excluded by `.gitignore`.
+
+FLY filters Japanese candidates using labels such as:
+
+`Japan`, `JPN`, `JP`, `日本`, `Tokyo`, `Osaka`, `東京`, `大阪`, `🇯🇵`
+
+It cannot guarantee that a provider labels nodes correctly, and it cannot turn a congested or poor route into a low-latency route.
+
+## Built-in profiles
+
+The repository currently includes profiles for:
+
+- Granblue Fantasy
+- 艦これ
+- DMM / FANZA entry domains
+- ウマ娘 (DMM版)
+- NIKKE
+
+The DMM profile is deliberately narrow in v0.8. It no longer sends every browser request through Japan just because DMM is enabled. Games hosted on third-party publisher/CDN domains should use their own profile or a user custom profile.
+
+## Community profiles
+
+To contribute a profile, add a JSON file to `rules/` and open a pull request. Keep rules as narrow as practical and do not use a catch-all rule.
+
+Private experiments should go in the in-app Custom editor instead. They are saved to:
+
+```text
+private/custom_profiles.json
+```
+
+and are never committed by the normal repository configuration.
+
+## Local caching
+
+FLY v0.8 intentionally does **not** implement transparent HTTPS MITM caching for GBF or other services. Doing that safely would require certificate interception and substantially increase security and compatibility risk. Browser/application caches remain untouched.
+
+Current optimization focuses on:
+
+- selective routing;
+- service-aware node testing;
+- stable exit nodes;
+- connection keep-alive;
+- TUN/process routing where needed;
+- QUIC fallback only for explicitly selected service domains.
+
+## Privacy and security
+
+- FLY does not operate an account backend.
+- FLY does not upload your subscription URL or credentials.
+- Mihomo's controller listens on `127.0.0.1` and uses a random local secret.
+- App updates are release-versioned and SHA-256 verified.
+- `private/`, `runtime/`, and `core/` are excluded from release source payloads.
+- A routing profile that does not match traffic cannot proxy that traffic; the final rule is `MATCH,DIRECT`.
+
+## Release packaging
+
+`scripts\MAKE_RELEASE_ZIP.ps1` creates the source/update payload without `private/`, `runtime/` or `core/`.
+
+For a v0.8+ self-update release, publish:
+
+```text
+FLY-update.zip
+FLY-update.zip.sha256
+```
+
+The SHA-256 file may contain either the raw 64-character digest or standard `sha256sum`-style text.
+
+The launcher executable can be built with:
+
+```powershell
+scripts\BUILD_LAUNCHER.ps1
+```
+
+## Disclaimer
+
+This project is for learning and legitimate selective-routing use. Users must supply and operate their own lawful network access and comply with applicable laws and the terms of the services they access.
 
 ## License
 
-代码以 [MIT](LICENSE) 协议开源。内核 mihomo 遵循其自身的 GPL-3.0 协议，由程序在用户本机从其官方 Release 自动下载，不随本项目二次分发。
+Project code is released under the [MIT License](LICENSE).
+
+Mihomo is a separate project distributed under its own license. FLY downloads the core from the official MetaCubeX release rather than bundling it into this repository.
