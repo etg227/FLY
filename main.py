@@ -178,7 +178,11 @@ class FlyApp:
             self.log(f"[FLY] Selected game(s): {names}")
             self.core.start(selected)
             self.selector=self.make_selector()
-            chosen,delay=self.selector.auto_select("FLY-JP",wait_s=45)
+            s=load_app_settings(PATHS)
+            chosen,delay=self.selector.auto_select("FLY-JP",wait_s=45,
+                preferred=str(s.get("last_node","")).strip() or None,
+                sticky_max_delay_ms=int(s.get("sticky_max_delay_ms",1000)))
+            self._remember_node(chosen)
 
             self.root.after(0,lambda n=chosen:self.node_var.set(n))
             self.root.after(0,lambda d=delay:self.delay_var.set(f"{d} ms" if d is not None else "unknown"))
@@ -206,11 +210,19 @@ class FlyApp:
             try:
                 sel=self.selector or self.make_selector()
                 n,d=sel.cycle_next("FLY-JP"); self.selector=sel
+                self._remember_node(n)
                 self.root.after(0,lambda:self.node_var.set(n))
                 self.root.after(0,lambda:self.delay_var.set(f"{d} ms" if d is not None else "unknown"))
             except Exception as e:
                 self.root.after(0,lambda:messagebox.showerror("FLY",str(e)))
         threading.Thread(target=work,daemon=True).start()
+
+    def _remember_node(self,name):
+        try:
+            s=load_app_settings(PATHS)
+            if s.get("last_node")!=name:
+                s["last_node"]=name; save_json(PATHS.app_settings,s)
+        except Exception: pass
 
     def _start_watchdog(self):
         # Quietly re-checks the chosen node once a minute; only switches when
@@ -237,6 +249,7 @@ class FlyApp:
                     self.log("[WATCH] Current node looks dead; reselecting the fastest Japan node...")
                     try:
                         chosen,delay=sel.auto_select("FLY-JP",wait_s=10)
+                        self._remember_node(chosen)
                         self.root.after(0,lambda n=chosen:self.node_var.set(n))
                         self.root.after(0,lambda d=delay:self.delay_var.set(f"{d} ms" if d is not None else "unknown"))
                     except Exception as e:

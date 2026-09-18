@@ -104,8 +104,24 @@ class JapanNodeSelector:
         except Exception as e:
             return node, None, str(e)
 
-    def auto_select(self, group="FLY-JP", wait_s=45):
+    def auto_select(self, group="FLY-JP", wait_s=45, preferred=None, sticky_max_delay_ms=1000):
         nodes = self.wait_for_candidates(group, wait_s)
+        # Sticky exit IP: reuse the last node whenever it is still usable, so
+        # the platform sees a stable address instead of a new one every start.
+        if preferred and preferred in nodes:
+            try:
+                d = self.api.delay(preferred, self.test_url, self.timeout_ms)
+                if d <= int(sticky_max_delay_ms):
+                    self.api.select(preferred, group)
+                    now = self.api.get_group(group).get("now")
+                    if now == preferred:
+                        self.log(f"[JP STICKY] {preferred} ({d} ms) — keeping the same exit IP.")
+                        return preferred, d
+                else:
+                    self.log(f"[JP] Last node degraded ({d} ms > {sticky_max_delay_ms} ms); re-selecting.")
+            except Exception as e:
+                self.log(f"[JP] Last node unavailable ({e}); re-selecting.")
+
         self.log(f"[JP] Found {len(nodes)} Japan candidate(s).")
         results = []
         with ThreadPoolExecutor(max_workers=min(6, len(nodes))) as pool:

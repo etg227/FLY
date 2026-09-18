@@ -30,6 +30,8 @@ DEFAULT_APP_SETTINGS = {
     "api_secret": "",
     "latency_test_url": "https://www.gstatic.com/generate_204",
     "latency_timeout_ms": 5000,
+    "last_node": "",
+    "sticky_max_delay_ms": 1000,
     "jp_keywords": ["Japan","JPN","JP","日本","Tokyo","Osaka","東京","东京","大阪","🇯🇵"]
 }
 
