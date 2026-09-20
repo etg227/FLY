@@ -195,13 +195,27 @@ def _remove_path(path: Path):
     elif path.exists():
         path.unlink()
 
+def _replace_retry(src, dst, attempts=8):
+    delay=0.02
+    last=None
+    for i in range(max(1,int(attempts))):
+        try:
+            os.replace(src,dst)
+            return
+        except PermissionError as e:
+            last=e
+            if i+1>=attempts: break
+            time.sleep(delay)
+            delay=min(0.25,delay*2)
+    raise last or PermissionError(f"cannot replace {dst}")
+
 def _atomic_file_copy(src: Path, dst: Path):
     dst.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=str(dst.parent), prefix=f".{dst.name}.", suffix=".new")
     os.close(fd)
     try:
         shutil.copy2(src, tmp)
-        os.replace(tmp, dst)
+        _replace_retry(tmp, dst)
     except BaseException:
         try: Path(tmp).unlink(missing_ok=True)
         except OSError: pass
