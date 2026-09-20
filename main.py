@@ -13,7 +13,7 @@ from backend.core_installer import install_core as download_core
 from backend.core_manager import CoreManager
 from backend.launcher import log_hints
 from backend.mihomo_api import MihomoApi, JapanNodeSelector
-from backend.subscription import fetch_userinfo, describe_userinfo, fmt_bytes, fmt_speed
+from backend.subscription import check_subscription, describe_userinfo, fmt_bytes, fmt_speed
 from backend.system_proxy import SystemProxy
 from backend.windows_admin import is_admin, relaunch_as_admin
 
@@ -33,6 +33,18 @@ class FlyApp:
         self.root.minsize(820, 760)
 
         self.logs = queue.Queue()
+        self._log_lock = threading.Lock()
+        self._log_file = None
+        try:
+            PATHS.runtime.mkdir(parents=True, exist_ok=True)
+            lp = PATHS.runtime / "fly.log"
+            if lp.exists() and lp.stat().st_size > 2 * 1024 * 1024:
+                lp.replace(PATHS.runtime / "fly.log.1")
+            self._log_file = open(lp, "a", encoding="utf-8")
+            self._log_file.write(f"\n===== FLY v{self.version} 会话开始 {time.strftime('%Y-%m-%d %H:%M:%S')} =====\n")
+            self._log_file.flush()
+        except OSError:
+            pass
         self.core = CoreManager(PATHS, self.log)
         self.sysproxy = SystemProxy(PATHS.runtime / "sysproxy_backup.json", self.log)
         self.selector = None
@@ -67,6 +79,7 @@ class FlyApp:
 
         self.log(f"FLY v{self.version} 就绪。")
         self.log("安全原则：只有命中所选配置的流量走 FLY-JP，其余一律 DIRECT。")
+        self.log("[LOG] 日志同时写入 runtime\\fly.log —— 反馈问题请附上该文件。")
         self.sysproxy.restore_orphan()
         threading.Thread(target=self.core.cleanup_orphans,daemon=True).start()
         if autostart:
@@ -168,7 +181,14 @@ class FlyApp:
         if self.core.is_running():
             self.log("[SERVICES] 正在加速中，重新点“一键加速”后生效。")
 
-    def log(self,msg): self.logs.put(f"{time.strftime('%H:%M:%S')} {msg}")
+    def log(self,msg):
+        line=f"{time.strftime('%H:%M:%S')} {msg}"
+        self.logs.put(line)
+        if self._log_file:
+            try:
+                with self._log_lock:
+                    self._log_file.write(time.strftime("%m-%d ")+line+"\n"); self._log_file.flush()
+            except OSError: pass
 
     def flush_logs(self):
         try:
@@ -193,22 +213,22 @@ class FlyApp:
         src=load_node_source(PATHS)
         if str(src.get("mode","file")).lower()!="subscription":
             self.sub_var.set("本地节点模式（无订阅流量信息）"); return
-        url=str(src.get("subscription_url","")).strip()
-        if not url:
+        urls=[u for u in src.get("subscription_urls",[]) if u]
+        if not urls:
             self.sub_var.set("-"); return
         if self._sub_fetching: return
         if not force and time.time()-self._sub_last<60: return
         self._sub_fetching=True
         self.sub_var.set("查询中...")
         def work():
-            try:
-                info=fetch_userinfo(url)
-                text=describe_userinfo(info)
-            except Exception as e:
-                text=f"查询失败（{e}）"
-            finally:
-                self._sub_fetching=False
-                self._sub_last=time.time()
+            parts=[]
+            for i,url in enumerate(urls,1):
+                ok,info=check_subscription(url)
+                tag=f"#{i} " if len(urls)>1 else ""
+                parts.append(tag+(describe_userinfo(info) if ok else "订阅不可用"))
+            self._sub_fetching=False
+            self._sub_last=time.time()
+            text=" ｜ ".join(parts)
             self.root.after(0,lambda t=text:self.sub_var.set(t))
         threading.Thread(target=work,daemon=True).start()
 
@@ -413,12 +433,12 @@ class FlyApp:
 class SettingsWindow(tk.Toplevel):
     def __init__(self,master,profiles,on_saved):
         super().__init__(master)
-        self.title("FLY - 节点 / 应用设置"); self.geometry("720x620")
+        self.title("FLY - 节点 / 应用设置"); self.geometry("720x660")
         ensure_private_files(PATHS)
         src=load_node_source(PATHS); app=load_app_settings(PATHS)
         self.on_saved=on_saved
         self.mode=tk.StringVar(value=src.get("mode","file"))
-        self.url=tk.StringVar(value=src.get("subscription_url",""))
+        self._sub_urls=list(src.get("subscription_urls",[]))
         self.timeout=tk.StringVar(value=str(app.get("latency_timeout_ms",5000)))
         self.sticky=tk.StringVar(value=str(app.get("sticky_max_delay_ms",1000)))
         self.tun_profiles=[r for r in profiles if _needs_tun(r)]
@@ -428,8 +448,11 @@ class SettingsWindow(tk.Toplevel):
         f=ttk.Frame(self,padding=14); f.pack(fill="both",expand=True)
         box=ttk.LabelFrame(f,text="你的节点来源",padding=10); box.pack(fill="x")
         ttk.Radiobutton(box,text="本地 private\\nodes.yaml",variable=self.mode,value="file").pack(anchor="w")
-        ttk.Radiobutton(box,text="Clash/Mihomo 订阅 URL",variable=self.mode,value="subscription").pack(anchor="w",pady=(8,0))
-        ttk.Entry(box,textvariable=self.url).pack(fill="x",pady=(7,0))
+        ttk.Radiobutton(box,text="Clash/Mihomo 订阅 URL（可填多条，每行一个；节点合并使用，一家挂了自动用另一家）",
+                        variable=self.mode,value="subscription").pack(anchor="w",pady=(8,0))
+        self.sub_text=tk.Text(box,height=3,font=("Consolas",9))
+        self.sub_text.pack(fill="x",pady=(7,0))
+        self.sub_text.insert("1.0","\n".join(self._sub_urls))
         ttk.Button(box,text="打开 nodes.yaml",command=lambda:os.startfile(str(PATHS.nodes_yaml))).pack(anchor="w",pady=(10,0))
 
         auto=ttk.LabelFrame(f,text="日本节点自动选择",padding=10); auto.pack(fill="x",pady=(12,0))
@@ -461,7 +484,10 @@ class SettingsWindow(tk.Toplevel):
             if timeout<1000 or sticky<100: raise ValueError
         except ValueError:
             messagebox.showerror("FLY","请输入有效数值：超时 ≥1000ms，沿用阈值 ≥100ms。"); return
-        save_json(PATHS.node_source,{"mode":self.mode.get(),"subscription_url":self.url.get().strip()})
+        urls=[u.strip() for u in self.sub_text.get("1.0","end").splitlines() if u.strip()]
+        save_json(PATHS.node_source,{"mode":self.mode.get(),
+                                     "subscription_urls":urls,
+                                     "subscription_url":urls[0] if urls else ""})
         app=load_app_settings(PATHS)
         exes=app.get("game_exes",{})
         for pid,var in self.exe_vars.items():

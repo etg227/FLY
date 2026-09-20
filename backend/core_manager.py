@@ -117,7 +117,7 @@ class CoreManager:
     def start(self, game_ids):
         self.stop()
         self.cleanup_orphans()
-        home, cfg = build_runtime_config(self.paths, game_ids)
+        home, cfg = build_runtime_config(self.paths, game_ids, log=self.log)
         self.validate(home, cfg)
         self.process = subprocess.Popen(
             [str(self.paths.core_exe), "-d", str(home), "-f", str(cfg)],

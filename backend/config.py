@@ -24,7 +24,7 @@ class Paths:
     @property
     def custom_profiles(self): return self.private / "custom_profiles.json"
 
-DEFAULT_NODE_SOURCE = {"mode": "file", "subscription_url": ""}
+DEFAULT_NODE_SOURCE = {"mode": "file", "subscription_url": "", "subscription_urls": []}
 DEFAULT_APP_SETTINGS = {
     "game_exes": {},
     "services_enabled": True,
@@ -70,7 +70,19 @@ def ensure_private_files(paths: Paths):
             encoding="utf-8"
         )
 
-def load_node_source(paths): return load_json(paths.node_source, DEFAULT_NODE_SOURCE)
+def load_node_source(paths):
+    data = load_json(paths.node_source, DEFAULT_NODE_SOURCE)
+    urls = data.get("subscription_urls")
+    if not isinstance(urls, list):
+        urls = []
+    urls = [str(u).strip() for u in urls if str(u).strip()]
+    # v0.8.7 及更早只有单条 subscription_url —— 迁移进列表
+    single = str(data.get("subscription_url", "")).strip()
+    if single and single not in urls:
+        urls.insert(0, single)
+    data["subscription_urls"] = urls
+    data["subscription_url"] = urls[0] if urls else ""
+    return data
 
 def load_app_settings(paths):
     data = load_json(paths.app_settings, DEFAULT_APP_SETTINGS)
@@ -204,9 +216,9 @@ def node_source_is_configured(paths):
     src = load_node_source(paths)
     mode = str(src.get("mode","file")).strip().lower()
     if mode == "subscription":
-        url = str(src.get("subscription_url","")).strip()
-        return (url.startswith("http://") or url.startswith("https://"),
-                "订阅 URL" if url else "订阅 URL 为空")
+        urls = [u for u in src.get("subscription_urls", [])
+                if u.startswith("http://") or u.startswith("https://")]
+        return (bool(urls), f"{len(urls)} 条订阅" if urls else "订阅 URL 为空")
     if mode != "file":
         return False, f"未知的节点来源：{mode}"
     if not paths.nodes_yaml.exists():

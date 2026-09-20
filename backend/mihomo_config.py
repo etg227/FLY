@@ -1,5 +1,6 @@
 from pathlib import Path
 from .config import Paths, copy_local_provider, load_app_settings, load_node_source, load_profile_rule
+from .subscription import provider_cache_name, select_usable_subscriptions
 
 def q(v): return "'" + str(v).replace("'", "''") + "'"
 
@@ -24,9 +25,10 @@ def _dedup(items):
             seen.add(s.lower()); out.append(s)
     return out
 
-def build_runtime_config(paths: Paths, profile_ids):
+def build_runtime_config(paths: Paths, profile_ids, log=None):
     """Build one Mihomo instance for any number of routing profiles.
     Safety invariant: every unmatched flow ends at MATCH,DIRECT."""
+    log = log or (lambda m: None)
     if isinstance(profile_ids, str):
         profile_ids = [profile_ids]
     profiles = [load_profile_rule(paths, p) for p in profile_ids]
@@ -111,32 +113,49 @@ def build_runtime_config(paths: Paths, profile_ids):
     else:
         lines += ["tun:", "  enable: false", ""]
 
-    mode = str(source.get("mode","file")).strip().lower()
-    lines += ["proxy-providers:", "  USER:"]
-    if mode == "subscription":
-        lines += [
-            "    type: http",
-            f"    url: {q(str(source.get('subscription_url','')).strip())}",
-            "    path: ./provider/subscription.yaml",
-            "    interval: 3600",
-        ]
-    else:
-        copy_local_provider(paths, home)
-        lines += ["    type: file", "    path: ./provider/nodes.yaml"]
-
-    lines += [
+    HEALTH_CHECK = [
         "    health-check:",
         "      enable: true",
         "      url: https://www.gstatic.com/generate_204",
         "      interval: 300",
         "      timeout: 5000",
         "      lazy: true",
+    ]
+    mode = str(source.get("mode","file")).strip().lower()
+    lines += ["proxy-providers:"]
+    provider_names = []
+    if mode == "subscription":
+        provider_dir = home / "provider"
+        provider_dir.mkdir(parents=True, exist_ok=True)
+        # Multiple subscriptions merge into one pool: if one provider's nodes
+        # die, selection simply moves to another provider's Japan nodes.
+        usable = select_usable_subscriptions(source.get("subscription_urls", []), provider_dir, log)
+        if not usable:
+            raise RuntimeError("所有订阅都无法访问且没有本地缓存，请检查网络或订阅链接。")
+        for i, u in enumerate(usable, 1):
+            name = f"USER{i}"
+            provider_names.append(name)
+            lines += [
+                f"  {name}:",
+                "    type: http",
+                f"    url: {q(u)}",
+                f"    path: ./provider/{provider_cache_name(u)}",
+                "    interval: 3600",
+            ] + HEALTH_CHECK
+    else:
+        copy_local_provider(paths, home)
+        provider_names = ["USER"]
+        lines += ["  USER:", "    type: file", "    path: ./provider/nodes.yaml"] + HEALTH_CHECK
+
+    lines += [
         "",
         "proxy-groups:",
         "  - name: FLY-JP",
         "    type: select",
         "    use:",
-        "      - USER",
+    ]
+    lines += [f"      - {n}" for n in provider_names]
+    lines += [
         "",
         "rules:",
     ]
