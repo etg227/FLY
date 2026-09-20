@@ -7,7 +7,7 @@ from tkinter import ttk, filedialog, messagebox
 from backend.config import (
     Paths, ensure_private_files, list_routing_profiles, profile_from_url,
     load_app_settings, load_node_source, load_custom_profiles, save_custom_profiles,
-    node_source_is_configured, save_json, app_version
+    node_source_is_configured, save_json, app_version, validate_profile
 )
 from backend.core_installer import install_core as download_core
 from backend.core_manager import CoreManager
@@ -45,7 +45,7 @@ class FlyApp:
             self._log_file.flush()
         except OSError:
             pass
-        self.core = CoreManager(PATHS, self.log)
+        self.core = CoreManager(PATHS, self.log, on_exit=self._on_core_exit)
         self.sysproxy = SystemProxy(PATHS.runtime / "sysproxy_backup.json", self.log)
         self.selector = None
         self.sysproxy_active = False
@@ -412,6 +412,34 @@ class FlyApp:
                     except Exception as e:
                         self.log(f"[WATCH] Reselect failed: {e}")
 
+    def _ui(self, fn):
+        """把 UI 更新投递回主线程；窗口已销毁时安静丢弃。"""
+        try:
+            self.root.after(0, fn)
+        except RuntimeError:
+            pass
+
+    def _on_core_exit(self, code):
+        """内核意外退出：立刻还原系统代理，并让界面如实反映状态。
+
+        不这么做的话，系统代理会一直指向一个没人监听的端口——
+        浏览器全网打不开，而界面还显示“加速中”。"""
+        if self._watch_stop:
+            self._watch_stop.set(); self._watch_stop = None
+        if self._traffic_stop:
+            self._traffic_stop.set(); self._traffic_stop = None
+        if self.sysproxy_active:
+            self.sysproxy.restore(); self.sysproxy_active = False
+            self.log("[CORE] 已自动还原系统代理，浏览器恢复直连。")
+        self.selector = None
+        self._ui(lambda: self.status_var.set("内核异常退出"))
+        self._ui(lambda: self.node_var.set("-"))
+        self._ui(lambda: self.delay_var.set("-"))
+        self._ui(lambda: self.traffic_var.set("-"))
+        self._ui(lambda: self.start_btn.configure(state="normal"))
+        self._ui(lambda: messagebox.showwarning(
+            "FLY", "加速内核意外退出，已自动还原系统代理。\n详情见日志，可重新点“一键加速”。"))
+
     def _teardown(self):
         if self._watch_stop:
             self._watch_stop.set(); self._watch_stop=None
@@ -549,7 +577,7 @@ class CustomSitesWindow(tk.Toplevel):
         pid=profile["id"]; n=2
         while profile["id"] in taken:
             profile["id"]=f"{pid}-{n}"; n+=1
-        cleaned=[{k:v for k,v in p.items() if k!="source"} for p in existing]
+        cleaned=[{k:v for k,v in p.items() if k not in ("source","invalid_values")} for p in existing]
         cleaned.append(profile)
         save_custom_profiles(PATHS,cleaned)
         self.url_var.set(""); self.name_var.set("")
@@ -557,7 +585,7 @@ class CustomSitesWindow(tk.Toplevel):
 
     def remove_site(self,pid,name):
         if not messagebox.askyesno("FLY",f"删除「{name}」？",parent=self): return
-        cleaned=[{k:v for k,v in p.items() if k!="source"}
+        cleaned=[{k:v for k,v in p.items() if k not in ("source","invalid_values")}
                  for p in load_custom_profiles(PATHS) if p["id"]!=pid]
         save_custom_profiles(PATHS,cleaned)
         self.refresh_list(); self.on_saved()
@@ -592,7 +620,7 @@ class CustomProfilesWindow(tk.Toplevel):
         ttk.Label(f,text="内容保存在 private\\custom_profiles.json，永远不会被提交。domains / processes / ip_cidrs / ports 只写你明确要代理的流量；注意 ports 是全系统级按端口匹配（如填 443 等于全部 HTTPS），请谨慎使用。",wraplength=740).pack(anchor="w",pady=(4,8))
         self.text=tk.Text(f,wrap="none",font=("Consolas",10))
         self.text.pack(fill="both",expand=True)
-        current={"profiles":[{k:v for k,v in p.items() if k!="source"} for p in load_custom_profiles(PATHS)]}
+        current={"profiles":[{k:v for k,v in p.items() if k not in ("source","invalid_values")} for p in load_custom_profiles(PATHS)]}
         if not current["profiles"]: current=self.TEMPLATE
         self.text.insert("1.0",json.dumps(current,ensure_ascii=False,indent=2))
         row=ttk.Frame(f); row.pack(fill="x",pady=(8,0))
@@ -603,13 +631,23 @@ class CustomProfilesWindow(tk.Toplevel):
             data=json.loads(self.text.get("1.0","end"))
             if not isinstance(data,dict) or not isinstance(data.get("profiles"),list):
                 raise ValueError("顶层必须包含 profiles 数组。")
-            ids=set()
+            ids=set(); problems=[]
             for p in data["profiles"]:
                 if not isinstance(p,dict): raise ValueError("每个配置必须是对象。")
                 pid=str(p.get("id","")).strip(); name=str(p.get("name","")).strip()
                 if not pid or not name: raise ValueError("每个配置都需要 id 和 name。")
                 if pid in ids: raise ValueError(f"配置 id 重复：{pid}")
+                if "sort" in p:
+                    try: int(p["sort"])
+                    except (TypeError, ValueError):
+                        raise ValueError(f"配置 {pid} 的 sort 必须是整数。")
                 ids.add(pid)
+                problems += [f"{pid}: {x}" for x in validate_profile(p)]
+            if problems and not messagebox.askyesno(
+                    "FLY",
+                    "以下值不符合分流规则语法（含逗号/井号/换行，或不是合法的 CIDR/端口），"
+                    "保存后会被忽略：\n\n" + "\n".join(problems[:10]) + "\n\n仍要保存吗？"):
+                return
             save_custom_profiles(PATHS,data["profiles"])
         except Exception as e:
             messagebox.showerror("FLY",f"配置 JSON 无效：\n{e}"); return

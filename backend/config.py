@@ -40,11 +40,19 @@ DEFAULT_APP_SETTINGS = {
 }
 DEFAULT_CUSTOM_PROFILES = {"profiles": []}
 
-def load_json(path: Path, default):
+def _fallback(default):
+    return default.copy() if isinstance(default, dict) else default
+
+def load_json(path: Path, default, expect=None):
+    """expect: 期望的顶层类型。文件是合法 JSON 但类型不对时同样回落默认值——
+    否则后续的 .get() 会在完全不相关的地方炸掉，甚至让程序起不来。"""
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
     except Exception:
-        return default.copy() if isinstance(default, dict) else default
+        return _fallback(default)
+    if expect is not None and not isinstance(data, expect):
+        return _fallback(default)
+    return data
 
 def save_json(path: Path, data):
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -71,7 +79,7 @@ def ensure_private_files(paths: Paths):
         )
 
 def load_node_source(paths):
-    data = load_json(paths.node_source, DEFAULT_NODE_SOURCE)
+    data = load_json(paths.node_source, DEFAULT_NODE_SOURCE, expect=dict)
     urls = data.get("subscription_urls")
     if not isinstance(urls, list):
         urls = []
@@ -85,7 +93,7 @@ def load_node_source(paths):
     return data
 
 def load_app_settings(paths):
-    data = load_json(paths.app_settings, DEFAULT_APP_SETTINGS)
+    data = load_json(paths.app_settings, DEFAULT_APP_SETTINGS, expect=dict)
     changed = False
     for k, v in DEFAULT_APP_SETTINGS.items():
         if k not in data:
@@ -104,12 +112,43 @@ def load_app_settings(paths):
         save_json(paths.app_settings, data)
     return data
 
+# 这些字段会被原样拼进 mihomo 的 rules，任何逗号/井号/换行都可能注入新规则行，
+# 进而绕过末尾的 MATCH,DIRECT 兜底。宁可丢弃可疑值，也不让它进配置。
+RULE_FIELDS = ("domains", "keywords", "ip_cidrs", "processes", "ports")
+_RULE_BAD = re.compile(r"[,#\r\n]")
+_PORT_RE = re.compile(r"^\d{1,5}(-\d{1,5})?$")
+_CIDR_RE = re.compile(r"^[0-9A-Fa-f:.]+/\d{1,3}$")
+# 域名/关键字只挡 YAML 与规则分隔符，不限制字符集——IDN(中文域名)要能原样通过
+_HOSTISH_BAD = re.compile(r"""[\s/'"\[\]{}]""")
+
+def _clean_rule_values(key, values):
+    """返回 (合法值, 被丢弃的值)。"""
+    ok, bad = [], []
+    for v in values:
+        s = str(v).strip()
+        if not s or _RULE_BAD.search(s):
+            bad.append(s); continue
+        if key == "ports" and not _PORT_RE.match(s):
+            bad.append(s); continue
+        if key == "ip_cidrs" and not _CIDR_RE.match(s):
+            bad.append(s); continue
+        if key in ("domains", "keywords") and _HOSTISH_BAD.search(s):
+            bad.append(s); continue
+        ok.append(s)
+    return ok, bad
+
+def _safe_int(value, default):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
 def _normalize_profile(rule, source="builtin"):
     r = dict(rule or {})
     r["id"] = str(r.get("id","")).strip()
     r["name"] = str(r.get("name", r["id"])).strip()
     r["source"] = source
-    r.setdefault("sort", 99)
+    r["sort"] = _safe_int(r.get("sort", 99), 99)
     r.setdefault("category", "Games" if source == "builtin" else "Custom")
     r.setdefault("launch_mode", "browser")
     for key in ("domains","keywords","ip_cidrs","processes","ports","latency_test_urls"):
@@ -117,6 +156,11 @@ def _normalize_profile(rule, source="builtin"):
         if isinstance(value, str):
             value = [value]
         r[key] = [str(x).strip() for x in value if str(x).strip()]
+    dropped = []
+    for key in RULE_FIELDS:
+        r[key], bad = _clean_rule_values(key, r[key])
+        dropped += [f"{key}={x!r}" for x in bad]
+    r["invalid_values"] = dropped
     if r.get("latency_test_url") and not r["latency_test_urls"]:
         r["latency_test_urls"] = [str(r["latency_test_url"]).strip()]
     # full_browser is an explicit, clearly-labelled opt-in: only a profile that
@@ -127,8 +171,12 @@ def _normalize_profile(rule, source="builtin"):
     r["always_on"] = bool(r.get("always_on"))
     return r
 
+def validate_profile(rule):
+    """返回该配置中不符合分流规则语法、保存后会被忽略的值（不修改入参）。"""
+    return list(_normalize_profile(rule).get("invalid_values", []))
+
 def load_custom_profiles(paths):
-    data = load_json(paths.custom_profiles, DEFAULT_CUSTOM_PROFILES)
+    data = load_json(paths.custom_profiles, DEFAULT_CUSTOM_PROFILES, expect=dict)
     raw = data.get("profiles", []) if isinstance(data, dict) else []
     out = []
     for item in raw:
@@ -145,6 +193,7 @@ def save_custom_profiles(paths, profiles):
             continue
         p = dict(item)
         p.pop("source", None)
+        p.pop("invalid_values", None)
         if str(p.get("id","")).strip() and str(p.get("name","")).strip():
             cleaned.append(p)
     save_json(paths.custom_profiles, {"profiles": cleaned})
@@ -200,7 +249,7 @@ def list_routing_profiles(paths):
     profiles.extend(load_custom_profiles(paths))
     by_id = {p["id"]: p for p in profiles}
     profiles = list(by_id.values())
-    profiles.sort(key=lambda r: (str(r.get("category","")), int(r.get("sort",99)), str(r.get("id"))))
+    profiles.sort(key=lambda r: (str(r.get("category","")), _safe_int(r.get("sort", 99), 99), str(r.get("id"))))
     return profiles
 
 def load_profile_rule(paths, profile_id):

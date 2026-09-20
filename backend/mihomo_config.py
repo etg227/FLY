@@ -32,6 +32,9 @@ def build_runtime_config(paths: Paths, profile_ids, log=None):
     if isinstance(profile_ids, str):
         profile_ids = [profile_ids]
     profiles = [load_profile_rule(paths, p) for p in profile_ids]
+    for pid, profile in zip(profile_ids, profiles):
+        for bad in profile.get("invalid_values", []):
+            log(f"[RULE] 配置 {pid} 中的 {bad} 不符合分流规则语法，已忽略。")
     settings = load_app_settings(paths)
     source = load_node_source(paths)
     home = paths.runtime / "mihomo"
@@ -159,6 +162,7 @@ def build_runtime_config(paths: Paths, profile_ids, log=None):
         "",
         "rules:",
     ]
+    rules_start = len(lines)
 
     if tun_mode:
         for d in domains:
@@ -191,6 +195,16 @@ def build_runtime_config(paths: Paths, profile_ids, log=None):
 
     lines.append("  - MATCH,DIRECT")
     lines.append("")
+
+    # 安全不变量：整份规则里 MATCH 只能有一条，且必须是末尾的 MATCH,DIRECT。
+    # 任何注入若绕过了字段白名单，也会在这里被拦下，而不是静默变成全局代理。
+    rule_lines = [x.strip() for x in lines[rules_start:] if x.strip()]
+    matches = [x for x in rule_lines if x.upper().startswith("- MATCH,")]
+    if len(matches) != 1 or rule_lines[-1] != "- MATCH,DIRECT":
+        raise RuntimeError(
+            "生成的分流规则未通过安全校验（MATCH,DIRECT 兜底规则异常），已拒绝启动。"
+            "请检查自定义配置里的 domains / keywords / ip_cidrs / ports / processes。"
+        )
 
     cfg = home / "config.yaml"
     cfg.write_text("\n".join(lines), encoding="utf-8")

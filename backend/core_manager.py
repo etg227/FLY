@@ -47,11 +47,16 @@ def _create_kill_on_close_job():
         return None
 
 class CoreManager:
-    def __init__(self, paths: Paths, log):
+    def __init__(self, paths: Paths, log, on_exit=None):
         self.paths, self.log = paths, log
         self.process = None
         self.reader_thread = None
         self._job = None
+        # 内核可能在任何时刻自己死掉（崩溃、被杀软终止、端口被抢）。
+        # 没人盯着的话系统代理会一直指向一个死端口，浏览器全网断，
+        # 而界面仍显示“加速中”。on_exit 让上层能立刻收拾现场。
+        self._stopping = False
+        self.on_exit = on_exit
 
     def is_installed(self): return self.paths.core_exe.exists()
     def is_running(self): return self.process is not None and self.process.poll() is None
@@ -89,14 +94,33 @@ class CoreManager:
         except Exception:
             pass
 
-    def _read_output(self):
-        if not self.process or not self.process.stdout: return
+    def _read_output(self, proc):
         try:
-            for line in self.process.stdout:
-                line = line.rstrip()
-                if line: self.log("[CORE] " + line)
+            if proc.stdout:
+                for line in proc.stdout:
+                    line = line.rstrip()
+                    if line: self.log("[CORE] " + line)
         except Exception as e:
             self.log(f"[CORE] log reader stopped: {e}")
+        finally:
+            # 管道读完 == 进程已经结束，这是最早能察觉内核退出的时刻。
+            self._notify_exit(proc)
+
+    def _notify_exit(self, proc):
+        """内核进程结束时触发；主动 stop() 不算意外退出。"""
+        if self._stopping or proc is not self.process:
+            return
+        try:
+            code = proc.wait(timeout=5)
+        except Exception:
+            code = proc.poll()
+        self.process = None
+        self.log(f"[CORE] 内核意外退出（exit code: {code}）——加速已中断。")
+        if self.on_exit:
+            try:
+                self.on_exit(code)
+            except Exception as e:
+                self.log(f"[CORE] exit handler failed: {e}")
 
     def validate(self, home, cfg):
         if not self.is_installed():
@@ -119,6 +143,7 @@ class CoreManager:
         self.cleanup_orphans()
         home, cfg = build_runtime_config(self.paths, game_ids, log=self.log)
         self.validate(home, cfg)
+        self._stopping = False
         self.process = subprocess.Popen(
             [str(self.paths.core_exe), "-d", str(home), "-f", str(cfg)],
             cwd=str(self.paths.app),
@@ -128,7 +153,7 @@ class CoreManager:
             creationflags=self._flags()
         )
         self._assign_job(self.process)
-        self.reader_thread = threading.Thread(target=self._read_output, daemon=True)
+        self.reader_thread = threading.Thread(target=self._read_output, args=(self.process,), daemon=True)
         self.reader_thread.start()
         port = int(load_app_settings(self.paths).get("controller_port",19090))
         deadline = time.time() + 15
@@ -139,11 +164,13 @@ class CoreManager:
                     return
             except OSError:
                 time.sleep(0.2)
-        code = self.process.poll()
+        proc = self.process
+        code = proc.poll() if proc else None
         self.stop()
         raise CoreError(f"Mihomo did not become ready. Exit code: {code}")
 
     def stop(self):
+        self._stopping = True
         proc, self.process = self.process, None
         if not proc: return
         if proc.poll() is None:
