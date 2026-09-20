@@ -42,6 +42,27 @@ class LauncherTests(unittest.TestCase):
             launcher._extract_verified(data,hashlib.sha256(data).hexdigest(),self.td/"stage")
         self.assertFalse((self.td.parent/"evil.txt").exists())
 
+    def test_other_unsafe_zip_paths_and_protected_dirs_are_rejected(self):
+        for name in ("../evil.txt","/absolute.txt","C:/evil.txt","private/secret.txt","runtime/state.txt",".git/config"):
+            buf=io.BytesIO()
+            with zipfile.ZipFile(buf,"w") as z:z.writestr(name,"x")
+            data=buf.getvalue()
+            with self.assertRaises(RuntimeError,msg=name):
+                launcher._extract_verified(data,hashlib.sha256(data).hexdigest(),self.td/("stage-"+str(abs(hash(name)))))
+
+    def test_invalid_manifest_shapes_are_rejected(self):
+        top=self.td/"badmanifest"; top.mkdir()
+        for payload in (
+            [],
+            {"schema":2,"managed_dirs":[],"managed_root":[]},
+            {"schema":1,"managed_dirs":"backend","managed_root":[]},
+            {"schema":1,"managed_dirs":["backend","unknown"],"managed_root":[]},
+            {"schema":1,"managed_dirs":[],"managed_root":[123]},
+        ):
+            (top/"update-manifest.json").write_text(json.dumps(payload),encoding="utf-8")
+            with self.assertRaises(RuntimeError):
+                launcher._read_manifest(top)
+
     def _payload(self,version="0.8.11"):
         top=self.td/"payload"; (top/"backend").mkdir(parents=True)
         (top/"rules").mkdir(); (top/"scripts").mkdir()
