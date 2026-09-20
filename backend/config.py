@@ -83,6 +83,22 @@ def load_json(path: Path, default, expect=None):
         return _fallback(default)
     return data
 
+def _replace_with_retry(src, dst, attempts=8):
+    """Windows AV/indexers can briefly hold the destination during os.replace."""
+    delay = 0.01
+    last = None
+    for i in range(max(1, int(attempts))):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError as e:
+            last = e
+            if i + 1 >= attempts:
+                break
+            time.sleep(delay)
+            delay = min(0.2, delay * 2)
+    raise last or PermissionError(f"cannot replace {dst}")
+
 def save_json(path: Path, data):
     """Atomic + serialized JSON write; readers never observe half-written data."""
     path = Path(path)
@@ -96,7 +112,7 @@ def save_json(path: Path, data):
                 f.write(payload)
                 f.flush()
                 os.fsync(f.fileno())
-            os.replace(tmp, path)
+            _replace_with_retry(tmp, path)
         except BaseException:
             try: Path(tmp).unlink(missing_ok=True)
             except OSError: pass
