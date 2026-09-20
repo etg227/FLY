@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 from .config import (Paths, _clean_rule_values, copy_local_provider, load_app_settings,
                      load_node_source, load_profile_rules, profile_has_effect)
 from .subscription import provider_cache_name, select_usable_subscriptions
@@ -261,6 +262,11 @@ def redact_runtime_config(cfg: Path, sensitive_urls):
         text = Path(cfg).read_text(encoding="utf-8")
         for idx, url in enumerate(sensitive_urls or (), 1):
             text = text.replace(str(url), f"<redacted-subscription-{idx}>")
+        text = re.sub(
+            r"(?m)^secret:\s*.*$",
+            "secret: '<redacted-api-secret>'",
+            text,
+        )
         Path(cfg).write_text(text, encoding="utf-8")
     except OSError:
         pass
