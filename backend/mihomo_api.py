@@ -1,14 +1,24 @@
 from __future__ import annotations
-import json, re, time, urllib.parse, urllib.request, urllib.error
+import json, re, threading, time, urllib.parse, urllib.request, urllib.error
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-class MihomoApiError(RuntimeError): pass
+class MihomoApiError(RuntimeError):
+    def __init__(self, message, status=None):
+        super().__init__(message)
+        self.status = status          # HTTP 状态码，没有就是 None
+
+def _not_found(err):
+    """只认状态码——响应体里恰好出现 'HTTP 404' 字样不该被当成 404。"""
+    return getattr(err, "status", None) == 404
 
 class MihomoApi:
     def __init__(self, port=19090, secret=""):
         self.base = f"http://127.0.0.1:{int(port)}"
         self.secret = str(secret or "")
         self._provider_by_node = None
+        self._provider_ok = False        # 索引是否成功取到过
+        self._provider_at = 0.0          # 上次尝试时间，失败后用于退避
+        self._provider_lock = threading.Lock()
 
     def _request(self, method, path, data=None, timeout=8):
         body = None
@@ -25,7 +35,7 @@ class MihomoApi:
                 return None if not raw else json.loads(raw.decode("utf-8", errors="replace"))
         except urllib.error.HTTPError as e:
             detail = e.read().decode("utf-8", errors="replace")
-            raise MihomoApiError(f"HTTP {e.code}: {detail or e.reason}") from e
+            raise MihomoApiError(f"HTTP {e.code}: {detail or e.reason}", status=e.code) from e
         except Exception as e:
             raise MihomoApiError(str(e)) from e
 
@@ -64,16 +74,31 @@ class MihomoApi:
         self._provider_by_node = mapping
         return mapping
 
-    def provider_for_node(self, node_name, refresh=False):
-        if refresh or self._provider_by_node is None:
-            try:
-                self._refresh_provider_index()
-            except Exception:
-                # Provider discovery is an optimization/compatibility layer.
-                # Keep the legacy direct-proxy delay endpoint as a fallback.
-                if self._provider_by_node is None:
-                    self._provider_by_node = {}
-        return self._provider_by_node.get(node_name)
+    def provider_for_node(self, node_name, refresh=False, _retry_after=2.0):
+        """返回节点所属的 provider 名；未知返回 None。
+
+        失败不做负缓存：取索引偶发失败一次就永久退回 legacy 接口的话，
+        整轮选线会全灭，而且日志里看不出任何退化。同时用锁+退避窗口
+        兜住两件事——并发测速只打一次 /providers/proxies；索引端点真的
+        挂了时，也不会被每个探测各重试一遍。"""
+        with self._provider_lock:
+            now = time.time()
+            need = refresh or self._provider_by_node is None or not self._provider_ok
+            # 刚失败过就先别重试；索引取到过之后，refresh 仍然可以强制刷新
+            blocked = (not self._provider_ok and self._provider_by_node is not None
+                       and (now - self._provider_at) < _retry_after)
+            if need and not blocked:
+                self._provider_at = now
+                try:
+                    self._refresh_provider_index()
+                    self._provider_ok = True
+                except Exception:
+                    # provider 发现只是兼容层，取不到就先走 legacy 接口，
+                    # 但保持 _provider_ok=False，退避窗口过后还会再试。
+                    self._provider_ok = False
+                    if self._provider_by_node is None:
+                        self._provider_by_node = {}
+            return self._provider_by_node.get(node_name)
 
     @staticmethod
     def _delay_value(data):
@@ -95,30 +120,40 @@ class MihomoApi:
         qs = urllib.parse.urlencode({"url": test_url, "timeout": int(timeout_ms)})
         req_timeout = (int(timeout_ms) / 1000) + 3
 
+        def probe_provider(provider):
+            p = urllib.parse.quote(provider, safe="")
+            return self._delay_value(self._request(
+                "GET", f"/providers/proxies/{p}/{name}/healthcheck?{qs}", timeout=req_timeout))
+
         provider = self.provider_for_node(node_name)
         if provider:
-            p = urllib.parse.quote(provider, safe="")
-            path = f"/providers/proxies/{p}/{name}/healthcheck?{qs}"
             try:
-                return self._delay_value(self._request("GET", path, timeout=req_timeout))
+                return probe_provider(provider)
             except MihomoApiError as e:
-                # Provider contents can change after a subscription refresh.
-                # Refresh membership once before falling back.
-                if "HTTP 404" not in str(e):
+                if not _not_found(e):
                     raise
+                # 订阅刷新后节点可能换了 provider——刷新索引再试一次
                 provider = self.provider_for_node(node_name, refresh=True)
                 if provider:
-                    p = urllib.parse.quote(provider, safe="")
-                    path = f"/providers/proxies/{p}/{name}/healthcheck?{qs}"
                     try:
-                        return self._delay_value(self._request("GET", path, timeout=req_timeout))
+                        return probe_provider(provider)
                     except MihomoApiError as retry_error:
-                        if "HTTP 404" not in str(retry_error):
+                        if not _not_found(retry_error):
                             raise
 
-        # Compatibility path for standalone proxies and older Mihomo builds.
-        data = self._request("GET", f"/proxies/{name}/delay?{qs}", timeout=req_timeout)
-        return self._delay_value(data)
+        # 独立 proxies 与老版本内核的兼容路径
+        try:
+            return self._delay_value(self._request(
+                "GET", f"/proxies/{name}/delay?{qs}", timeout=req_timeout))
+        except MihomoApiError as e:
+            if not _not_found(e):
+                raise
+            # legacy 也 404：订阅节点根本不在 tunnel.Proxies() 里。
+            # 索引可能没取到或已过期，强制刷新后最后再试一次 provider 接口。
+            provider = self.provider_for_node(node_name, refresh=True)
+            if not provider:
+                raise
+            return probe_provider(provider)
 
 META_HINTS = ("traffic","expire","expiry","reset","remaining","剩余","流量","到期","套餐","官网","公告")
 DEFAULT_JP = ("japan","jpn","日本","tokyo","osaka","東京","东京","大阪","🇯🇵")

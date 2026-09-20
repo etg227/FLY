@@ -57,6 +57,10 @@ class CoreManager:
         # 而界面仍显示“加速中”。on_exit 让上层能立刻收拾现场。
         self._stopping = False
         self.on_exit = on_exit
+        # 残留清理是按内核路径匹配的，跟我们自己刚启动的那个一模一样。
+        # 用同一把锁把「扫描并杀」和「启动内核」串起来，否则后台清理
+        # 可能正好杀掉自己刚 Popen 出来的进程（提权 autostart 最容易撞）。
+        self._cleanup_lock = threading.Lock()
 
     def is_installed(self): return self.paths.core_exe.exists()
     def is_running(self): return self.process is not None and self.process.poll() is None
@@ -79,6 +83,12 @@ class CoreManager:
         matched strictly by OUR core path so a user's own Clash is untouched."""
         if os.name != "nt" or not self.is_installed():
             return
+        with self._cleanup_lock:
+            if self.process is not None:
+                return          # 自己的内核正在跑，这时候扫就是自杀
+            self._cleanup_orphans_locked()
+
+    def _cleanup_orphans_locked(self):
         exe = str(self.paths.core_exe.resolve()).replace("'", "''")
         ps = ("$p = Get-Process -Name mihomo -ErrorAction SilentlyContinue | "
               f"Where-Object {{ $_.Path -eq '{exe}' }}; "
@@ -143,15 +153,17 @@ class CoreManager:
         self.cleanup_orphans()
         home, cfg = build_runtime_config(self.paths, game_ids, log=self.log)
         self.validate(home, cfg)
-        self._stopping = False
-        self.process = subprocess.Popen(
-            [str(self.paths.core_exe), "-d", str(home), "-f", str(cfg)],
-            cwd=str(self.paths.app),
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, encoding="utf-8", errors="replace",
-            creationflags=self._flags()
-        )
+        # 拿着同一把锁再启动：后台清理要么已经跑完，要么会看到 process 非空而跳过
+        with self._cleanup_lock:
+            self._stopping = False
+            self.process = subprocess.Popen(
+                [str(self.paths.core_exe), "-d", str(home), "-f", str(cfg)],
+                cwd=str(self.paths.app),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, encoding="utf-8", errors="replace",
+                creationflags=self._flags()
+            )
         self._assign_job(self.process)
         self.reader_thread = threading.Thread(target=self._read_output, args=(self.process,), daemon=True)
         self.reader_thread.start()

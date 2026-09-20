@@ -20,6 +20,9 @@ from backend.windows_admin import is_admin, relaunch_as_admin
 APP_DIR = Path(__file__).resolve().parent
 PATHS = Paths(APP_DIR)
 
+class _Cancelled(Exception):
+    """启动流程被“停止”或关窗打断。"""
+
 def _needs_tun(profile):
     return str(profile.get("launch_mode","browser")).lower() == "tun" or bool(profile.get("processes"))
 
@@ -52,6 +55,13 @@ class FlyApp:
         self._watch_stop = None
         self._traffic_stop = None
         self._core_installing = False
+        # 启动是个几十秒的后台流程，中途可能被“停止”或关窗打断。
+        # 没有取消机制的话，worker 会在窗口销毁之后才去开系统代理，
+        # 于是代理永久指向一个死端口——浏览器断网到下次启动 FLY。
+        self._start_token = 0
+        self._start_thread = None
+        self._closing = False
+        self._proxy_lock = threading.Lock()
         self._sub_fetching = False
         self._sub_last = 0.0
 
@@ -323,16 +333,25 @@ class FlyApp:
                 self.root.after(300,self.root.destroy)
             return
         self.status_var.set("启动中..."); self.start_btn.configure(state="disabled")
-        threading.Thread(target=self._start_worker,args=(effective,selected),daemon=True).start()
+        self._start_token += 1
+        self._start_thread = threading.Thread(
+            target=self._start_worker, args=(effective, selected, self._start_token), daemon=True)
+        self._start_thread.start()
 
-    def _start_worker(self,effective,selected):
+    def _check_cancelled(self, token):
+        if self._closing or token != self._start_token:
+            raise _Cancelled()
+
+    def _start_worker(self,effective,selected,token):
         try:
             names="、".join(self.profile_by_id[p]["name"] for p in selected) or "（无）"
             self.log(f"[FLY] 已选配置：{names}")
             if len(effective)>len(selected):
                 svc="、".join(self.profile_by_id[p]["name"] for p in effective if p not in selected)
                 self.log(f"[FLY] 默认加速的常用服务：{svc}")
+            self._check_cancelled(token)
             self.core.start(effective)
+            self._check_cancelled(token)
             # 测速目标只取用户勾选的配置，常用服务不参与排名，避免测速过重。
             self.selector=self.make_selector(selected)
             s=load_app_settings(PATHS)
@@ -341,6 +360,7 @@ class FlyApp:
                 preferred=str(s.get("last_node","")).strip() or None,
                 sticky_max_delay_ms=int(s.get("sticky_max_delay_ms",1000))
             )
+            self._check_cancelled(token)
             self._remember_node(chosen)
             self.root.after(0,lambda n=chosen:self.node_var.set(n))
             self.root.after(0,lambda d=delay:self.delay_var.set(f"{d} ms" if d is not None else "unknown"))
@@ -349,12 +369,21 @@ class FlyApp:
             has_domain_only=any(not _needs_tun(self.profile_by_id[p]) for p in effective)
             if has_domain_only and not uses_tun:
                 port=int(s.get("mixed_port",17890))
-                self.sysproxy.enable(port); self.sysproxy_active=True
+                # 取消判定必须和开代理在同一把锁里：否则可能在 teardown
+                # 还原之后才把代理打开，留下一个没人收拾的系统代理。
+                with self._proxy_lock:
+                    self._check_cancelled(token)
+                    self.sysproxy.enable(port); self.sysproxy_active=True
+            self._check_cancelled(token)
             log_hints(PATHS,selected,self.log)
             self._start_watchdog()
             self._start_traffic_monitor()
             self._refresh_subscription_info(force=True)
             self.root.after(0,lambda:self.status_var.set(f"加速中（{len(effective)} 项）"))
+        except _Cancelled:
+            self.log("[FLY] 启动已取消，正在收拾现场...")
+            self._teardown()
+            self._ui(lambda:self.status_var.set("已停止"))
         except Exception as e:
             self.log(f"[ERROR] {e}")
             self._teardown()
@@ -424,13 +453,15 @@ class FlyApp:
 
         不这么做的话，系统代理会一直指向一个没人监听的端口——
         浏览器全网打不开，而界面还显示“加速中”。"""
+        self._start_token += 1        # 让还在跑的启动流程立刻作废
         if self._watch_stop:
             self._watch_stop.set(); self._watch_stop = None
         if self._traffic_stop:
             self._traffic_stop.set(); self._traffic_stop = None
-        if self.sysproxy_active:
-            self.sysproxy.restore(); self.sysproxy_active = False
-            self.log("[CORE] 已自动还原系统代理，浏览器恢复直连。")
+        with self._proxy_lock:
+            if self.sysproxy_active:
+                self.sysproxy.restore(); self.sysproxy_active = False
+                self.log("[CORE] 已自动还原系统代理，浏览器恢复直连。")
         self.selector = None
         self._ui(lambda: self.status_var.set("内核异常退出"))
         self._ui(lambda: self.node_var.set("-"))
@@ -441,13 +472,16 @@ class FlyApp:
             "FLY", "加速内核意外退出，已自动还原系统代理。\n详情见日志，可重新点“一键加速”。"))
 
     def _teardown(self):
+        # 令牌一变，还在跑的启动流程下一个检查点就会退出
+        self._start_token += 1
         if self._watch_stop:
             self._watch_stop.set(); self._watch_stop=None
         if self._traffic_stop:
             self._traffic_stop.set(); self._traffic_stop=None
-        self.root.after(0,lambda:self.traffic_var.set("-"))
-        if self.sysproxy_active:
-            self.sysproxy.restore(); self.sysproxy_active=False
+        self._ui(lambda:self.traffic_var.set("-"))
+        with self._proxy_lock:
+            if self.sysproxy_active:
+                self.sysproxy.restore(); self.sysproxy_active=False
         self.core.stop(); self.selector=None
 
     def stop_accel(self):
@@ -456,7 +490,14 @@ class FlyApp:
         self.log("[FLY] 加速已停止。")
 
     def on_close(self):
-        self._teardown(); self.root.destroy()
+        self._closing = True
+        self._start_token += 1
+        t = self._start_thread
+        if t and t.is_alive():
+            self.log("[FLY] 等待启动流程退出...")
+            t.join(timeout=5)
+        self._teardown()
+        self.root.destroy()
 
 class SettingsWindow(tk.Toplevel):
     def __init__(self,master,profiles,on_saved):
