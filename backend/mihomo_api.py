@@ -8,6 +8,7 @@ class MihomoApi:
     def __init__(self, port=19090, secret=""):
         self.base = f"http://127.0.0.1:{int(port)}"
         self.secret = str(secret or "")
+        self._provider_by_node = None
 
     def _request(self, method, path, data=None, timeout=8):
         body = None
@@ -38,14 +39,86 @@ class MihomoApi:
     def select(self, node_name, group="FLY-JP"):
         self._request("PUT", f"/proxies/{urllib.parse.quote(group, safe='')}", {"name": node_name})
 
-    def delay(self, node_name, test_url, timeout_ms=5000):
-        name = urllib.parse.quote(node_name, safe="")
-        qs = urllib.parse.urlencode({"url": test_url, "timeout": int(timeout_ms)})
-        data = self._request("GET", f"/proxies/{name}/delay?{qs}", timeout=(int(timeout_ms)/1000)+3)
+    def _refresh_provider_index(self):
+        """Map provider-backed proxy names to their provider.
+
+        Mihomo keeps proxy-provider nodes under /providers/proxies/... and some
+        builds do not expose them through /proxies/{name}/delay. Cache the
+        provider membership so parallel latency tests do not refetch it for
+        every node.
+        """
+        mapping = {}
+        data = self._request("GET", "/providers/proxies", timeout=5)
+        providers = data.get("providers", {}) if isinstance(data, dict) else {}
+        if not isinstance(providers, dict):
+            providers = {}
+        for provider_name, provider in providers.items():
+            proxies = provider.get("proxies", []) if isinstance(provider, dict) else []
+            for proxy in proxies:
+                if isinstance(proxy, dict):
+                    name = str(proxy.get("name", "")).strip()
+                else:
+                    name = str(proxy).strip()
+                if name:
+                    mapping.setdefault(name, str(provider_name))
+        self._provider_by_node = mapping
+        return mapping
+
+    def provider_for_node(self, node_name, refresh=False):
+        if refresh or self._provider_by_node is None:
+            try:
+                self._refresh_provider_index()
+            except Exception:
+                # Provider discovery is an optimization/compatibility layer.
+                # Keep the legacy direct-proxy delay endpoint as a fallback.
+                if self._provider_by_node is None:
+                    self._provider_by_node = {}
+        return self._provider_by_node.get(node_name)
+
+    @staticmethod
+    def _delay_value(data):
         delay = data.get("delay") if isinstance(data, dict) else None
         if isinstance(delay, int) and delay > 0:
             return delay
         raise MihomoApiError("No usable latency result")
+
+    def delay(self, node_name, test_url, timeout_ms=5000):
+        """Measure one node using the endpoint appropriate for its source.
+
+        Provider-backed nodes use:
+          /providers/proxies/{provider}/{proxy}/healthcheck
+
+        Standalone/global proxies keep using:
+          /proxies/{proxy}/delay
+        """
+        name = urllib.parse.quote(node_name, safe="")
+        qs = urllib.parse.urlencode({"url": test_url, "timeout": int(timeout_ms)})
+        req_timeout = (int(timeout_ms) / 1000) + 3
+
+        provider = self.provider_for_node(node_name)
+        if provider:
+            p = urllib.parse.quote(provider, safe="")
+            path = f"/providers/proxies/{p}/{name}/healthcheck?{qs}"
+            try:
+                return self._delay_value(self._request("GET", path, timeout=req_timeout))
+            except MihomoApiError as e:
+                # Provider contents can change after a subscription refresh.
+                # Refresh membership once before falling back.
+                if "HTTP 404" not in str(e):
+                    raise
+                provider = self.provider_for_node(node_name, refresh=True)
+                if provider:
+                    p = urllib.parse.quote(provider, safe="")
+                    path = f"/providers/proxies/{p}/{name}/healthcheck?{qs}"
+                    try:
+                        return self._delay_value(self._request("GET", path, timeout=req_timeout))
+                    except MihomoApiError as retry_error:
+                        if "HTTP 404" not in str(retry_error):
+                            raise
+
+        # Compatibility path for standalone proxies and older Mihomo builds.
+        data = self._request("GET", f"/proxies/{name}/delay?{qs}", timeout=req_timeout)
+        return self._delay_value(data)
 
 META_HINTS = ("traffic","expire","expiry","reset","remaining","剩余","流量","到期","套餐","官网","公告")
 DEFAULT_JP = ("japan","jpn","日本","tokyo","osaka","東京","东京","大阪","🇯🇵")
