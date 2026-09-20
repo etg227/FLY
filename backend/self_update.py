@@ -1,8 +1,27 @@
 from __future__ import annotations
-import os, subprocess, tempfile, time
+import os, subprocess, sys
 from pathlib import Path
 
-def schedule_launcher_replace(root: Path, log=lambda m: None):
+# 替换动作跑在一个独立的解释器进程里，源码通过 -c 传参，不落盘。
+#
+# 之前的做法是往 %TEMP% 写一个文件名可预测的 .cmd 再执行它。TUN 模式下
+# 整个 FLY 是以管理员身份运行的，于是就成了「提权进程执行同用户可写目录里
+# 的脚本」——同用户的非提权进程可以抢先占位或在写入与执行之间掉包，拿到
+# 管理员权限的代码执行。不写文件就没有这个窗口。
+_IS_WINDOWS = os.name == "nt"
+
+_REPLACER = (
+    "import os,sys,time\n"
+    "src,dst=sys.argv[1],sys.argv[2]\n"
+    "for _ in range(30):\n"
+    "    try:\n"
+    "        os.replace(src,dst)\n"
+    "        break\n"
+    "    except OSError:\n"
+    "        time.sleep(1)\n"          # 旧启动器还占着 launcher.exe，等它退出
+)
+
+def schedule_launcher_replace(root: Path, log=lambda m: None, spawn=None):
     """Replace the frozen launcher after the currently running launcher exits.
 
     v0.8.10's updater can copy launcher.exe.new even though it cannot overwrite
@@ -13,27 +32,19 @@ def schedule_launcher_replace(root: Path, log=lambda m: None):
     root = Path(root)
     pending = root / "launcher.exe.new"
     target = root / "launcher.exe"
-    if os.name != "nt" or not pending.exists():
+    if not _IS_WINDOWS or not pending.exists():
         return False
-    script = Path(tempfile.gettempdir()) / f"fly-launcher-update-{os.getpid()}-{int(time.time())}.cmd"
-    body = (
-        "@echo off\r\n"
-        "setlocal\r\n"
-        "for /L %%I in (1,1,30) do (\r\n"
-        f'  move /Y "{pending}" "{target}" >nul 2>nul && goto done\r\n'
-        "  timeout /t 1 /nobreak >nul\r\n"
-        ")\r\n"
-        ":done\r\n"
-        'del "%~f0" >nul 2>nul\r\n'
-    )
+    if not sys.executable:
+        log("[UPDATE] 找不到当前解释器，launcher.exe 自动替换已跳过。")
+        return False
+    spawn = spawn or subprocess.Popen
     try:
-        script.write_text(body, encoding="utf-8")
-        subprocess.Popen(["cmd.exe", "/c", str(script)],
-                         cwd=str(root),
-                         stdin=subprocess.DEVNULL,
-                         stdout=subprocess.DEVNULL,
-                         stderr=subprocess.DEVNULL,
-                         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        spawn([sys.executable, "-c", _REPLACER, str(pending), str(target)],
+              cwd=str(root),
+              stdin=subprocess.DEVNULL,
+              stdout=subprocess.DEVNULL,
+              stderr=subprocess.DEVNULL,
+              creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         log("[UPDATE] 已安排 launcher.exe 在旧启动器退出后安全替换。")
         return True
     except Exception as e:
