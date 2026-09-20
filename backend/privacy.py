@@ -5,6 +5,10 @@ from urllib.parse import urlsplit
 _HOST_RE = re.compile(r"(?<![\w.-])((?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,})(?::(\d{1,5}))?")
 _IPV4_RE = re.compile(r"(?<!\d)(?:\d{1,3}\.){3}\d{1,3}(?::\d{1,5})?")
 _URL_RE = re.compile(r"https?://[^\s\]\[()<>\"']+")
+# api_secret 是 32 位 hex（secrets.token_hex(16)）。运行时配置已经抹掉它，
+# 日志同样不该带出去。长 hex 串在日志里只可能是凭据或完整哈希，统一打码；
+# 程序自己展示哈希时只取前 12 位，不受影响。
+_HEX_SECRET_RE = re.compile(r"(?<![0-9A-Fa-f])[0-9A-Fa-f]{32,64}(?![0-9A-Fa-f])")
 
 def _tag(kind, value):
     h = hashlib.sha256(str(value).encode("utf-8", errors="replace")).hexdigest()[:10]
@@ -30,6 +34,7 @@ def redact_log_line(line):
     """
     text = str(line)
     text = _URL_RE.sub(_redact_url, text)
+    text = _HEX_SECRET_RE.sub(lambda m: _tag("secret", m.group(0)), text)
     text = _IPV4_RE.sub(lambda m: _tag("ip", m.group(0)), text)
     text = _HOST_RE.sub(lambda m: _tag("host", m.group(1)) + (f":{m.group(2)}" if m.group(2) else ""), text)
     return text

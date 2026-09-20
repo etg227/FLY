@@ -3,6 +3,10 @@ import ctypes, json, os, uuid
 from pathlib import Path
 from .config import save_json
 
+# 模块级常量便于测试替换：测试里 patch 全局 os.name 会让 pathlib
+# 在补丁生效期间选 WindowsPath，非 Windows 机器上整组测试直接报错。
+_IS_WINDOWS = os.name == "nt"
+
 REG_PATH = r"Software\Microsoft\Windows\CurrentVersion\Internet Settings"
 _PRIVATE_172 = ";".join(f"172.{i}.*" for i in range(16, 32))
 PROXY_OVERRIDE = (
@@ -60,7 +64,7 @@ class SystemProxy:
         except OSError: pass
 
     def enable(self, port):
-        if os.name != "nt": return
+        if not _IS_WINDOWS: return
         expected = f"127.0.0.1:{int(port)}"
 
         # A stale backup means the previous process died. Repair it before
@@ -97,7 +101,7 @@ class SystemProxy:
         self.log(f"[PROXY] System proxy -> {expected}; unmatched destinations remain DIRECT.")
 
     def restore(self):
-        if os.name != "nt" or not self.backup_path.exists():
+        if not _IS_WINDOWS or not self.backup_path.exists():
             return
         backup = self._read_backup()
         if not backup:
@@ -121,7 +125,7 @@ class SystemProxy:
 
     def restore_orphan(self):
         """Repair only a proxy state that can be proven to belong to FLY."""
-        if os.name != "nt" or not self.backup_path.exists():
+        if not _IS_WINDOWS or not self.backup_path.exists():
             return
         backup = self._read_backup()
         if not backup:

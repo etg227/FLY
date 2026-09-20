@@ -12,7 +12,7 @@ class ProxyTests(unittest.TestCase):
                 "original":{"ProxyEnable":0,"ProxyServer":"","ProxyOverride":""}}
         self.path.write_text(json.dumps(backup),encoding="utf-8")
         p=sp.SystemProxy(self.path,self.logs.append)
-        with mock.patch.object(sp.os,"name","nt"),\
+        with mock.patch.object(sp,"_IS_WINDOWS",True),\
              mock.patch.object(sp,"_read_current",return_value={"ProxyEnable":1,"ProxyServer":"127.0.0.1:9999","ProxyOverride":""}),\
              mock.patch.object(sp,"_write") as write:
             p.restore()
@@ -24,7 +24,7 @@ class ProxyTests(unittest.TestCase):
                 "original":{"ProxyEnable":1,"ProxyServer":"corp:8080","ProxyOverride":"<local>"}}
         self.path.write_text(json.dumps(backup),encoding="utf-8")
         p=sp.SystemProxy(self.path,self.logs.append)
-        with mock.patch.object(sp.os,"name","nt"),\
+        with mock.patch.object(sp,"_IS_WINDOWS",True),\
              mock.patch.object(sp,"_read_current",return_value={"ProxyEnable":1,"ProxyServer":"127.0.0.1:17890","ProxyOverride":""}),\
              mock.patch.object(sp,"_write") as write:
             p.restore_orphan()
@@ -38,7 +38,7 @@ class ProxyTests(unittest.TestCase):
             calls.append(dict(values))
             if len(calls)==1:
                 raise OSError("registry write failed")
-        with mock.patch.object(sp.os,"name","nt"),\
+        with mock.patch.object(sp,"_IS_WINDOWS",True),\
              mock.patch.object(sp,"_read_current",return_value=original),\
              mock.patch.object(sp,"_write",side_effect=fake_write):
             with self.assertRaises(OSError):
@@ -49,7 +49,7 @@ class ProxyTests(unittest.TestCase):
     def test_failed_enable_keeps_backup_when_rollback_also_fails(self):
         original={"ProxyEnable":0,"ProxyServer":"","ProxyOverride":""}
         p=sp.SystemProxy(self.path,self.logs.append)
-        with mock.patch.object(sp.os,"name","nt"),\
+        with mock.patch.object(sp,"_IS_WINDOWS",True),\
              mock.patch.object(sp,"_read_current",return_value=original),\
              mock.patch.object(sp,"_write",side_effect=[OSError("enable"),OSError("rollback")]):
             with self.assertRaises(OSError):

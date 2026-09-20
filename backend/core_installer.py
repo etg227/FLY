@@ -176,6 +176,11 @@ def repair_from_archive(paths, log=lambda m: None) -> bool:
         return True
     except CoreVerifyError:
         return False
+    except OSError as e:
+        # 归档路径被目录占位/被锁/权限异常都不该卡死安装流程——
+        # 返回 False 让 install_core 继续走网络下载自救。
+        log(f"[CORE] 本地归档暂不可读（{e}），转为重新下载。")
+        return False
 
 def install_core(paths, log, fetch=None):
     """Install the exact pinned official Mihomo asset and retain its archive."""
@@ -201,6 +206,17 @@ def install_core(paths, log, fetch=None):
 
     # Write the trust anchor archive first, then the executable. A crash between
     # the two leaves a repairable state that inspect_core() can recover.
-    _write_atomic(core_archive_path(paths), blob)
+    archive = core_archive_path(paths)
+    if archive.is_dir():
+        # 目录占位（异常状态）——只清空目录，绝不删有内容的东西
+        try:
+            archive.rmdir()
+        except OSError as e:
+            log(f"[CORE] 归档位置被目录占用且无法清理（{e}），本次跳过归档留存。")
+    try:
+        _write_atomic(archive, blob)
+    except OSError as e:
+        # 留存归档只是为了离线修复，失败不该阻断安装本身
+        log(f"[CORE] 可信归档留存失败（{e}），离线修复暂不可用。")
     _write_atomic(paths.core_exe, exe_bytes)
     log(f"[CORE] {CORE_VERSION} 安装完成；归档与 exe 均已通过固定 SHA-256 校验。")

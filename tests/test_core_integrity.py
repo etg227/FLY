@@ -136,3 +136,21 @@ class VerificationConcurrencyTests(unittest.TestCase):
 
 if __name__=="__main__":
     unittest.main()
+
+
+class ArchivePathAnomalyTests(unittest.TestCase):
+    """归档路径异常（目录/被锁）曾让网络正常时也装不上内核。"""
+
+    def test_archive_being_a_directory_falls_back_to_download(self):
+        paths = Paths(Path(tempfile.mkdtemp()))
+        paths.core_exe.parent.mkdir(parents=True, exist_ok=True)
+        ci.core_archive_path(paths).mkdir()          # 目录占位
+        logs = []
+        with mock.patch.object(ci, "CORE_ZIP_SHA256", FAKE_SHA):
+            ci.install_core(paths, logs.append, fetch=FakeFetch())
+        self.assertTrue(paths.core_exe.exists())
+        self.assertTrue(any("重新下载" in x for x in logs))
+
+
+if __name__ == "__main__":
+    unittest.main()

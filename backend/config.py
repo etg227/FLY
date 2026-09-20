@@ -289,7 +289,9 @@ def load_app_settings(paths):
         return data
 
 RULE_FIELDS = ("domains", "keywords", "ip_cidrs", "processes", "ports")
-_RULE_BAD = re.compile(r"[,#\r\n]")
+# 逗号/井号/换行会改写规则语义；C0 控制符、DEL 与 Unicode 行分隔符
+# 会生成 mihomo 无法解析的 YAML（NUL 直接让整份配置被拒）。一律拒收。
+_RULE_BAD = re.compile(r"[,#\r\n\x00-\x1f\x7f\x85\u2028\u2029]")
 _PORT_RE = re.compile(r"^\d{1,5}(-\d{1,5})?$")
 _ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$", re.I)
 _HOSTISH_BAD = re.compile(r"""[\s/'"\[\]{}]""")

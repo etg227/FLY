@@ -80,3 +80,31 @@ class RoutingTests(unittest.TestCase):
 
 if __name__=="__main__":
     unittest.main()
+
+
+class ControlCharacterTests(unittest.TestCase):
+    """控制字符曾能穿过白名单，生成 mihomo 无法解析的 config.yaml。"""
+
+    def test_control_characters_are_rejected_in_every_rule_field(self):
+        from backend.config import RULE_FIELDS, _clean_rule_values
+        for ch in ("\x00", "\x08", "\x0b", "\x1b", "\x7f", "\x85", "\u2028", "\u2029"):
+            for field in RULE_FIELDS:
+                ok, bad = _clean_rule_values(field, [f"a{ch}b.com"])
+                self.assertEqual(ok, [], f"{field} 放行了控制字符 {ch!r}")
+                self.assertEqual(len(bad), 1)
+
+    def test_validate_profile_now_reports_control_characters(self):
+        from backend.config import validate_profile
+        problems = validate_profile({"id": "x", "name": "X", "domains": ["evil\x00.com"]})
+        self.assertEqual(len(problems), 1)
+
+    def test_plain_values_still_pass(self):
+        from backend.config import RULE_FIELDS, _clean_rule_values
+        ok, bad = _clean_rule_values("domains", ["dmm.co.jp", "*.dmmgames.com"])
+        self.assertEqual((len(ok), bad), (2, []))
+        ok, bad = _clean_rule_values("processes", ["My Game.exe"])
+        self.assertEqual((len(ok), bad), (1, []))
+
+
+if __name__ == "__main__":
+    unittest.main()
