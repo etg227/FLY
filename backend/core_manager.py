@@ -1,6 +1,7 @@
 from __future__ import annotations
 import ctypes, json, os, socket, subprocess, threading, time, urllib.error, urllib.request
 from .config import Paths, load_app_settings
+from .core_installer import CORE_VERSION
 from .mihomo_config import build_runtime_config, redact_runtime_config
 
 class CoreError(RuntimeError): pass
@@ -111,7 +112,9 @@ class CoreManager:
                                stderr=subprocess.STDOUT, text=True, encoding="utf-8",
                                errors="replace", timeout=timeout,
                                creationflags=self._flags())
-            return r.returncode == 0 and "mihomo" in (r.stdout or "").lower()
+            output = (r.stdout or "").lower()
+            expected = CORE_VERSION.lstrip("v").lower()
+            return r.returncode == 0 and "mihomo" in output and expected in output
         except Exception:
             return False
 
