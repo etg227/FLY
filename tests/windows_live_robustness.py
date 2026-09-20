@@ -17,6 +17,10 @@ import time
 import unittest
 from pathlib import Path
 
+REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 if os.name != "nt" or os.environ.get("FLY_WINDOWS_LIVE") != "1":
     raise SystemExit("windows_live_robustness.py requires Windows + FLY_WINDOWS_LIVE=1")
 
