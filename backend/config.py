@@ -108,6 +108,17 @@ def app_version(paths: Paths) -> str:
     except OSError:
         return "dev"
 
+def update_app_settings(paths, updates=None, mutator=None):
+    """Serialize the full app-settings read/modify/write transaction."""
+    with _lock_for(paths.app_settings):
+        data = load_app_settings(paths)
+        if mutator is not None:
+            mutator(data)
+        if updates:
+            data.update(dict(updates))
+        save_json(paths.app_settings, data)
+        return data
+
 def ensure_private_files(paths: Paths):
     paths.private.mkdir(parents=True, exist_ok=True)
     if not paths.node_source.exists():
