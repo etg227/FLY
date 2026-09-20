@@ -92,6 +92,15 @@ class NodesYamlTests(TempApp):
         self.p.nodes_yaml.write_text(sample, encoding="utf-16")
         self.assertTrue(node_source_is_configured(self.p)[0])
 
+    def test_utf16_nodes_are_normalized_to_utf8_runtime_provider(self):
+        from backend.config import copy_local_provider
+        sample='proxies:\n  - name: "日本01"\n    type: ss\n'
+        self.p.nodes_yaml.write_text(sample, encoding="utf-16")
+        target=copy_local_provider(self.p,self.p.runtime/"mihomo")
+        raw=target.read_bytes()
+        self.assertFalse(raw.startswith(b"\xff\xfe"))
+        self.assertEqual(raw.decode("utf-8"),sample)
+
 class CustomUrlTests(unittest.TestCase):
     def test_idn_domain_survives_and_gets_safe_id(self):
         p=profile_from_url("https://例子.测试/")
