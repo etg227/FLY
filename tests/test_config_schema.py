@@ -62,7 +62,8 @@ class SettingsSchemaTests(TempApp):
     def test_nested_settings_are_normalized(self):
         save_json(self.p.app_settings, {
             "game_exes": [], "mixed_port":"bad", "controller_port":17890,
-            "latency_timeout_ms":999999, "jp_keywords":["", "a", "日本"]
+            "latency_timeout_ms":999999, "jp_keywords":["", "a", "日本"],
+            "services_enabled":"false"
         })
         s=load_app_settings(self.p)
         self.assertIsInstance(s["game_exes"], dict)
@@ -70,6 +71,7 @@ class SettingsSchemaTests(TempApp):
         self.assertNotEqual(s["controller_port"], s["mixed_port"])
         self.assertEqual(s["latency_timeout_ms"], 30000)
         self.assertNotIn("a", s["jp_keywords"])
+        self.assertFalse(s["services_enabled"])
 
     def test_json_with_bom_is_readable(self):
         self.p.node_source.write_text(
@@ -104,7 +106,8 @@ class CustomUrlTests(unittest.TestCase):
 
     def test_normal_www_host_covers_same_site_subdomains(self):
         self.assertEqual(registrable_domain("www.wnacg.com"), "wnacg.com")
-        self.assertEqual(registrable_domain("api.example.co.jp"), "example.co.jp")
+        self.assertEqual(registrable_domain("api.example.co.jp"), "api.example.co.jp")
+        self.assertEqual(registrable_domain("api.foo.cloudfront.net"), "api.foo.cloudfront.net")
 
 class ValidateProfileTests(unittest.TestCase):
     def test_reports_injection_and_semantic_errors(self):
@@ -123,6 +126,13 @@ class ValidateProfileTests(unittest.TestCase):
             "ports":["443","1000-2000"],"ip_cidrs":["1.1.1.0/24","2001:db8::/32"],
             "processes":["My Game.exe"]
         }), [])
+
+    def test_boolean_strings_do_not_turn_false_into_true(self):
+        from backend.config import _normalize_profile
+        p=_normalize_profile({"id":"x","name":"X","domains":["x.jp"],
+                              "full_browser":"false","always_on":"0"})
+        self.assertFalse(p["full_browser"])
+        self.assertFalse(p["always_on"])
 
 if __name__=="__main__":
     unittest.main()
