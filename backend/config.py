@@ -202,53 +202,56 @@ def load_node_source(paths):
     }
 
 def load_app_settings(paths):
-    raw = load_json(paths.app_settings, DEFAULT_APP_SETTINGS, expect=dict)
-    data = _fallback(DEFAULT_APP_SETTINGS)
-    changed = False
+    # This function may migrate/normalize and write the file, so the complete
+    # read -> normalize -> write-back sequence must share the same RLock as
+    # update_app_settings(). Otherwise a stale normalization write can erase a
+    # concurrent user change even though each individual write is atomic.
+    with _lock_for(paths.app_settings):
+        raw = load_json(paths.app_settings, DEFAULT_APP_SETTINGS, expect=dict)
+        data = _fallback(DEFAULT_APP_SETTINGS)
+        changed = False
 
-    game_exes = raw.get("game_exes", {})
-    if isinstance(game_exes, dict):
-        data["game_exes"] = {
-            str(k): str(v).strip()
-            for k, v in game_exes.items()
-            if isinstance(v, str)
-        }
-    elif game_exes not in (None, {}):
-        _warn("app_settings.json 的 game_exes 类型错误，已忽略。")
-        changed = True
+        game_exes = raw.get("game_exes", {})
+        if isinstance(game_exes, dict):
+            data["game_exes"] = {
+                str(k): str(v).strip()
+                for k, v in game_exes.items()
+                if isinstance(v, str)
+            }
+        elif game_exes not in (None, {}):
+            _warn("app_settings.json 的 game_exes 类型错误，已忽略。")
+            changed = True
 
-    data["services_enabled"] = _safe_bool(raw.get("services_enabled", True), True)
-    data["mixed_port"] = _safe_int(raw.get("mixed_port", 17890), 17890, 1024, 65535)
-    data["controller_port"] = _safe_int(raw.get("controller_port", 19090), 19090, 1024, 65535)
-    if data["mixed_port"] == data["controller_port"]:
-        data["controller_port"] = 19090 if data["mixed_port"] != 19090 else 19091
-        _warn("mixed_port 与 controller_port 不能相同，controller_port 已自动调整。")
-        changed = True
+        data["services_enabled"] = _safe_bool(raw.get("services_enabled", True), True)
+        data["mixed_port"] = _safe_int(raw.get("mixed_port", 17890), 17890, 1024, 65535)
+        data["controller_port"] = _safe_int(raw.get("controller_port", 19090), 19090, 1024, 65535)
+        if data["mixed_port"] == data["controller_port"]:
+            data["controller_port"] = 19090 if data["mixed_port"] != 19090 else 19091
+            _warn("mixed_port 与 controller_port 不能相同，controller_port 已自动调整。")
+            changed = True
 
-    data["api_secret"] = str(raw.get("api_secret", "") or "").strip()
-    url = str(raw.get("latency_test_url", DEFAULT_APP_SETTINGS["latency_test_url"]) or "").strip()
-    data["latency_test_url"] = url if _valid_http_url(url) else DEFAULT_APP_SETTINGS["latency_test_url"]
-    data["latency_timeout_ms"] = _safe_int(raw.get("latency_timeout_ms", 5000), 5000, 1000, 30000)
-    data["last_node"] = str(raw.get("last_node", "") or "").strip()
-    data["sticky_max_delay_ms"] = _safe_int(raw.get("sticky_max_delay_ms", 1000), 1000, 100, 60000)
-    data["jp_keywords"] = _normalize_jp_keywords(raw.get("jp_keywords"))
+        data["api_secret"] = str(raw.get("api_secret", "") or "").strip()
+        url = str(raw.get("latency_test_url", DEFAULT_APP_SETTINGS["latency_test_url"]) or "").strip()
+        data["latency_test_url"] = url if _valid_http_url(url) else DEFAULT_APP_SETTINGS["latency_test_url"]
+        data["latency_timeout_ms"] = _safe_int(raw.get("latency_timeout_ms", 5000), 5000, 1000, 30000)
+        data["last_node"] = str(raw.get("last_node", "") or "").strip()
+        data["sticky_max_delay_ms"] = _safe_int(raw.get("sticky_max_delay_ms", 1000), 1000, 100, 60000)
+        data["jp_keywords"] = _normalize_jp_keywords(raw.get("jp_keywords"))
 
-    old_nikke = str(raw.get("nikke_exe", "") or "").strip()
-    if old_nikke and not data["game_exes"].get("nikke"):
-        data["game_exes"]["nikke"] = old_nikke
-        changed = True
+        old_nikke = str(raw.get("nikke_exe", "") or "").strip()
+        if old_nikke and not data["game_exes"].get("nikke"):
+            data["game_exes"]["nikke"] = old_nikke
+            changed = True
 
-    if not data["api_secret"]:
-        data["api_secret"] = secrets.token_hex(16)
-        changed = True
+        if not data["api_secret"]:
+            data["api_secret"] = secrets.token_hex(16)
+            changed = True
 
-    # Persist normalization/migration so a malformed setting cannot keep
-    # re-triggering problems on every launch.
-    normalized_keys = set(DEFAULT_APP_SETTINGS)
-    if (changed or set(raw.keys()) != normalized_keys or
-            any(raw.get(k) != data.get(k) for k in normalized_keys)):
-        save_json(paths.app_settings, data)
-    return data
+        normalized_keys = set(DEFAULT_APP_SETTINGS)
+        if (changed or set(raw.keys()) != normalized_keys or
+                any(raw.get(k) != data.get(k) for k in normalized_keys)):
+            save_json(paths.app_settings, data)
+        return data
 
 RULE_FIELDS = ("domains", "keywords", "ip_cidrs", "processes", "ports")
 _RULE_BAD = re.compile(r"[,#\r\n]")
