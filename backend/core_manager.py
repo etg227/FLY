@@ -1,5 +1,6 @@
 from __future__ import annotations
 import ctypes, json, os, socket, subprocess, threading, time, urllib.error, urllib.request
+from pathlib import Path
 from .config import Paths, load_app_settings
 from .core_installer import (
     VALID, MISSING, REPAIRABLE, INVALID, TRANSIENT,
