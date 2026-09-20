@@ -280,10 +280,22 @@ def _transactional_install(top: Path, root: Path, ui):
         journal.write_text(json.dumps({"state":"complete","manifest":manifest}),
                            encoding="utf-8")
         shutil.rmtree(txn, ignore_errors=True)
-    except BaseException:
+    except BaseException as update_error:
         try:
             _restore_snapshot(root, backup, manifest)
-        finally:
+        except BaseException as rollback_error:
+            # Keep journal + backup intact. The frozen launcher runs recovery
+            # before starting main.py on the next launch, which is safer than
+            # deleting the only rollback copy after a transient AV/file-lock.
+            if ui:
+                ui.log(
+                    f"即时回滚未完成（{rollback_error}）；已保留事务备份，"
+                    "下次启动会自动继续恢复。"
+                )
+            raise RuntimeError(
+                f"更新失败且即时回滚未完成；恢复数据已保留在 {txn}。"
+            ) from update_error
+        else:
             shutil.rmtree(txn, ignore_errors=True)
         raise
     for name in OBSOLETE:
