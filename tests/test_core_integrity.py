@@ -1,71 +1,138 @@
-"""Pinned official Mihomo core integrity tests."""
-import hashlib, io, json, tempfile, unittest, zipfile
+"""Pinned Mihomo archive trust-chain and verification robustness tests."""
+import hashlib, io, json, tempfile, threading, time, unittest, zipfile
 from pathlib import Path
+from unittest import mock
 
+import backend.core_installer as ci
+import backend.core_manager as cm_mod
 from backend.config import Paths
-from backend.core_installer import (
-    CoreVerifyError, expected_sha256, find_sha256, install_core, MIRRORS, CORE_VERSION
-)
+from backend.core_manager import CoreManager
 
-EXE=b"MZ fake mihomo binary"
-def make_zip(payload=EXE,name="mihomo-windows-amd64.exe"):
+FAKE_EXE = b"MZ" + b"x" * (1024 * 1024 + 4096)
+
+def make_zip(payload=FAKE_EXE):
     b=io.BytesIO()
-    with zipfile.ZipFile(b,"w") as z:z.writestr(name,payload)
+    with zipfile.ZipFile(b,"w",zipfile.ZIP_DEFLATED) as z:
+        z.writestr("mihomo-windows-amd64.exe",payload)
     return b.getvalue()
-ZIP=make_zip(); ZIP_SHA=hashlib.sha256(ZIP).hexdigest()
-ASSET_NAME="mihomo-windows-amd64-v1-v1.19.31.zip"
 
-def release(digest=None,extra_assets=()):
-    a={"name":ASSET_NAME,"browser_download_url":"https://github.test/core.zip"}
-    if digest:a["digest"]=digest
-    return {"assets":[a]+list(extra_assets)}
+FAKE_ZIP=make_zip()
+FAKE_SHA=hashlib.sha256(FAKE_ZIP).hexdigest()
 
 class FakeFetch:
-    def __init__(self,rel,zip_bytes=ZIP,sums=None):
-        self.rel,self.zip_bytes,self.sums=rel,zip_bytes,sums; self.calls=[]
-    def __call__(self,url,log,timeout=30,progress_tag=None,sources=None):
-        self.calls.append((url,tuple(sources) if sources is not None else None))
-        if "api.github.com" in url:return json.dumps(self.rel).encode(),""
-        if url.endswith("/sums"):return (self.sums or b""),""
-        return self.zip_bytes,""
+    def __init__(self,blob=FAKE_ZIP):
+        self.blob=blob; self.calls=[]
+    def __call__(self,url,log,timeout=60,progress_tag=None,sources=None):
+        self.calls.append((url,sources))
+        return self.blob,""
 
-class IntegrityTests(unittest.TestCase):
-    def setUp(self):
-        self.paths=Paths(Path(tempfile.mkdtemp())); self.logs=[]
-    def test_launcher_pins_the_same_version(self):
-        """launcher.py 里有一份副本，改版本时两处必须一起改。"""
+class TrustConstantTests(unittest.TestCase):
+    def test_launcher_pins_same_core_constants(self):
         import re
-        text = Path(__file__).resolve().parent.parent.joinpath("launcher.py").read_text(encoding="utf-8")
-        m = re.search(r'^CORE_VERSION\s*=\s*"([^"]+)"', text, re.M)
-        self.assertIsNotNone(m, "launcher.py 里找不到 CORE_VERSION")
-        self.assertEqual(m.group(1), CORE_VERSION,
-                         "launcher.py 与 backend/core_installer.py 的内核版本不一致")
+        text=Path(__file__).resolve().parent.parent.joinpath("launcher.py").read_text(encoding="utf-8")
+        for name,expected in [
+            ("CORE_VERSION",ci.CORE_VERSION),
+            ("CORE_ASSET_NAME",ci.CORE_ASSET_NAME),
+            ("CORE_ZIP_SHA256",ci.CORE_ZIP_SHA256),
+        ]:
+            m=re.search(rf'^{name}\s*=\s*"([^"]+)"',text,re.M)
+            self.assertIsNotNone(m,name)
+            self.assertEqual(m.group(1),expected)
 
-    def test_core_version_is_pinned(self):
-        self.assertEqual(CORE_VERSION,"v1.19.31")
-        self.assertEqual(MIRRORS,[""])
-    def test_checksum_parser_binds_filename(self):
-        text=f"{'a'*64}  other.zip\n{ZIP_SHA} *{ASSET_NAME}\n"
-        self.assertEqual(find_sha256(text,ASSET_NAME),ZIP_SHA)
-    def test_github_digest_installs_from_official_only(self):
-        ff=FakeFetch(release(digest=f"sha256:{ZIP_SHA}"))
-        install_core(self.paths,self.logs.append,fetch=ff)
-        self.assertEqual(self.paths.core_exe.read_bytes(),EXE)
-        zip_call=[c for c in ff.calls if c[0].endswith("core.zip")][0]
-        self.assertEqual(zip_call[1],("",))
-    def test_tampered_binary_rejected(self):
-        ff=FakeFetch(release(digest=f"sha256:{ZIP_SHA}"),zip_bytes=make_zip(b"EVIL"))
-        with self.assertRaises(CoreVerifyError):install_core(self.paths,self.logs.append,fetch=ff)
-        self.assertFalse(self.paths.core_exe.exists())
-    def test_missing_trusted_hash_is_fail_closed(self):
-        ff=FakeFetch(release())
-        with self.assertRaises(CoreVerifyError):install_core(self.paths,self.logs.append,fetch=ff)
-        self.assertFalse(any(c[0].endswith("core.zip") for c in ff.calls))
-    def test_checksum_asset_may_supply_hash(self):
-        sums={"name":"mihomo.sha256","browser_download_url":"https://github.test/sums"}
-        ff=FakeFetch(release(extra_assets=[sums]),sums=f"{ZIP_SHA}  {ASSET_NAME}\n".encode())
-        install_core(self.paths,self.logs.append,fetch=ff)
-        self.assertEqual(self.paths.core_exe.read_bytes(),EXE)
-        self.assertEqual([c for c in ff.calls if c[0].endswith("/sums")][0][1],("",))
+    def test_pinned_archive_is_exact_v1_asset(self):
+        self.assertEqual(ci.CORE_VERSION,"v1.19.31")
+        self.assertEqual(ci.CORE_ASSET_NAME,"mihomo-windows-amd64-v1-v1.19.31.zip")
+        self.assertEqual(ci.CORE_ZIP_SHA256,
+            "d89c9bd746e8aacff89b2edf674813e25e8bd2dc565f4e12dc3b4526dd2b3177")
+        self.assertEqual(ci.MIRRORS,[""])
 
-if __name__=="__main__":unittest.main()
+class InstallerTests(unittest.TestCase):
+    def setUp(self):
+        self.root=Path(tempfile.mkdtemp())
+        self.paths=Paths(self.root)
+        self.logs=[]
+    def _archive(self):
+        return ci.core_archive_path(self.paths)
+
+    def test_official_download_installs_archive_and_exe(self):
+        ff=FakeFetch()
+        with mock.patch.object(ci,"CORE_ZIP_SHA256",FAKE_SHA):
+            ci.install_core(self.paths,self.logs.append,fetch=ff)
+        self.assertEqual(self._archive().read_bytes(),FAKE_ZIP)
+        self.assertEqual(self.paths.core_exe.read_bytes(),FAKE_EXE)
+        self.assertEqual(ff.calls[0][0],ci.CORE_DOWNLOAD_URL)
+        self.assertEqual(ff.calls[0][1],[""])
+
+    def test_tampered_download_is_rejected_without_touching_existing_exe(self):
+        self.paths.core_exe.parent.mkdir(parents=True,exist_ok=True)
+        self.paths.core_exe.write_bytes(b"MZ-old")
+        ff=FakeFetch(make_zip(b"MZ"+b"evil"*300000))
+        with mock.patch.object(ci,"CORE_ZIP_SHA256",FAKE_SHA):
+            with self.assertRaises(ci.CoreVerifyError):
+                ci.install_core(self.paths,self.logs.append,fetch=ff)
+        self.assertEqual(self.paths.core_exe.read_bytes(),b"MZ-old")
+
+    def test_valid_local_archive_repairs_exe_without_network(self):
+        self._archive().parent.mkdir(parents=True,exist_ok=True)
+        self._archive().write_bytes(FAKE_ZIP)
+        self.paths.core_exe.write_bytes(b"MZ"+b"bad"*400000)
+        ff=mock.Mock(side_effect=AssertionError("network must not be used"))
+        with mock.patch.object(ci,"CORE_ZIP_SHA256",FAKE_SHA):
+            ci.install_core(self.paths,self.logs.append,fetch=ff)
+        self.assertEqual(self.paths.core_exe.read_bytes(),FAKE_EXE)
+        ff.assert_not_called()
+
+class InspectTests(unittest.TestCase):
+    def setUp(self):
+        self.root=Path(tempfile.mkdtemp()); self.paths=Paths(self.root)
+        self.archive=ci.core_archive_path(self.paths)
+        self.archive.parent.mkdir(parents=True,exist_ok=True)
+
+    def test_valid_exe_matches_trusted_archive(self):
+        self.archive.write_bytes(FAKE_ZIP); self.paths.core_exe.write_bytes(FAKE_EXE)
+        with mock.patch.object(ci,"CORE_ZIP_SHA256",FAKE_SHA):
+            self.assertEqual(ci.inspect_core(self.paths).state,ci.VALID)
+
+    def test_missing_or_modified_exe_is_repairable(self):
+        self.archive.write_bytes(FAKE_ZIP)
+        with mock.patch.object(ci,"CORE_ZIP_SHA256",FAKE_SHA):
+            self.assertEqual(ci.inspect_core(self.paths).state,ci.REPAIRABLE)
+            self.paths.core_exe.write_bytes(b"MZ"+b"z"*len(FAKE_EXE))
+            self.assertEqual(ci.inspect_core(self.paths).state,ci.REPAIRABLE)
+
+    def test_archive_hash_mismatch_is_invalid(self):
+        self.archive.write_bytes(FAKE_ZIP); self.paths.core_exe.write_bytes(FAKE_EXE)
+        with mock.patch.object(ci,"CORE_ZIP_SHA256","0"*64):
+            self.assertEqual(ci.inspect_core(self.paths).state,ci.INVALID)
+
+class VerificationConcurrencyTests(unittest.TestCase):
+    def setUp(self):
+        self.root=Path(tempfile.mkdtemp()); self.paths=Paths(self.root)
+        self.paths.core_exe.parent.mkdir(parents=True,exist_ok=True)
+        self.paths.core_exe.write_bytes(FAKE_EXE)
+        ci.core_archive_path(self.paths).write_bytes(FAKE_ZIP)
+        self.manager=CoreManager(self.paths,lambda m:None)
+
+    def test_parallel_verification_is_single_flight(self):
+        calls=[]; gate=threading.Lock()
+        def fake(paths):
+            with gate:calls.append(1)
+            time.sleep(.08)
+            return ci.CoreInspection(ci.VALID,"ok")
+        results=[]
+        with mock.patch.object(cm_mod,"inspect_core",side_effect=fake):
+            ts=[threading.Thread(target=lambda:results.append(self.manager.verify_binary_status().state))
+                for _ in range(8)]
+            [t.start() for t in ts]; [t.join() for t in ts]
+        self.assertEqual(calls,[1])
+        self.assertEqual(results,[ci.VALID]*8)
+
+    def test_transient_verification_is_not_cached(self):
+        seq=[ci.CoreInspection(ci.TRANSIENT,"locked"),ci.CoreInspection(ci.VALID,"ok")]
+        with mock.patch.object(cm_mod,"inspect_core",side_effect=seq) as probe:
+            self.assertEqual(self.manager.verify_binary_status().state,ci.TRANSIENT)
+            self.assertEqual(self.manager.verify_binary_status().state,ci.VALID)
+        self.assertEqual(probe.call_count,2)
+
+if __name__=="__main__":
+    unittest.main()
