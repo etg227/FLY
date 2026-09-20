@@ -1,30 +1,41 @@
-"""FLY launcher.
+"""FLY bootstrap launcher.
 
-v0.8+: application self-updates are release-based and fail closed:
-- discover only the latest GitHub Release;
-- download FLY-update.zip + FLY-update.zip.sha256 from that release;
-- verify SHA-256 before replacing any code;
-- never update code from the mutable main branch or third-party mirrors.
-
-User data (private/, core/, runtime/) is never touched.
+Updates are release-based, verified, transactional and recoverable.  private/,
+core/ and runtime/ are user/runtime state and are never replaced by an app
+update.
 """
 from __future__ import annotations
 import hashlib, io, json, os, queue, re, shutil, subprocess, sys, tempfile, threading, urllib.request, webbrowser, zipfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import tkinter as tk
 from tkinter import ttk
 
 OWNER = "etg227"
 REPO = "FLY"
 PROTECTED = {"private", "core", "runtime", ".git"}
+MANAGED_DIRS = ("backend", "rules", "scripts")
+MANAGED_ROOT = (
+    "main.py", "launcher.py", "README.md", "LICENSE", "START_FLY_DEBUG.bat",
+    ".gitignore", "update-manifest.json", "launcher.exe.new",
+)
 TIMEOUT = 20
 RELEASE_API = f"https://api.github.com/repos/{OWNER}/{REPO}/releases/latest"
 UPDATE_ASSET = "FLY-update.zip"
 CHECKSUM_ASSET = "FLY-update.zip.sha256"
+TXN_NAME = "update-txn"
 
 PYTHON_VERSION = "3.12.10"
-PYTHON_URLS = [
-    f"https://www.python.org/ftp/python/{PYTHON_VERSION}/python-{PYTHON_VERSION}-amd64.exe",
+PYTHON_URLS = [f"https://www.python.org/ftp/python/{PYTHON_VERSION}/python-{PYTHON_VERSION}-amd64.exe"]
+
+CORE_VERSION = "v1.19.31"
+CORE_API = f"https://api.github.com/repos/MetaCubeX/mihomo/releases/tags/{CORE_VERSION}"
+CORE_PATTERNS = (r"^mihomo-windows-amd64-v1-v[0-9].*\.zip$", r"^mihomo-windows-amd64.*\.zip$")
+CORE_SUM_HINTS = ("sha256","sha512","checksum","sums","digest")
+
+OBSOLETE = [
+    "START_FLY.bat","LAUNCHER.bat","INSTALL_CORE.bat","start_fly.py",
+    "FLY.exe","launcher.spec","FLY.spec","scripts/INSTALL_CORE.ps1",
+    "optional/wnacg.json","optional/gdmusic.json","optional/annas.json",
 ]
 
 def app_dir() -> Path:
@@ -32,9 +43,13 @@ def app_dir() -> Path:
         return Path(sys.executable).resolve().parent
     return Path(__file__).resolve().parent
 
+def _opener():
+    # Bootstrap/control traffic must never inherit FLY's Windows system proxy.
+    return urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
 def fetch(url: str, ui=None) -> bytes:
     req = urllib.request.Request(url, headers={"User-Agent": f"{REPO}-launcher"})
-    with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
+    with _opener().open(req, timeout=TIMEOUT) as resp:
         total = int(resp.headers.get("Content-Length") or 0)
         buf, done = io.BytesIO(), 0
         while True:
@@ -59,64 +74,195 @@ def _version_tuple(v):
 def latest_release(ui=None):
     data = json.loads(fetch(RELEASE_API, ui).decode("utf-8", errors="replace"))
     tag = str(data.get("tag_name","")).lstrip("vV")
-    assets = {a.get("name"):a.get("browser_download_url") for a in data.get("assets",[]) if a.get("name")}
+    assets = {a.get("name"):a.get("browser_download_url")
+              for a in data.get("assets",[]) if a.get("name")}
     return tag, assets
 
-def _parse_sha256(blob: bytes) -> str:
+def _parse_sha256(blob: bytes, filename=UPDATE_ASSET) -> str:
     text = blob.decode("utf-8-sig", errors="replace").strip()
-    m = re.search(r"\b([a-fA-F0-9]{64})\b", text)
-    if not m:
-        raise RuntimeError("Release 校验文件里没有 SHA-256 值。")
-    return m.group(1).lower()
+    lines = [x.strip() for x in text.splitlines() if x.strip()]
+    for line in lines:
+        m = re.match(r"^([a-fA-F0-9]{64})[\s*]+(.+)$", line)
+        if m and PurePosixPath(m.group(2).replace("\\","/").strip()).name == filename:
+            return m.group(1).lower()
+    if len(lines) == 1:
+        m = re.fullmatch(r"(?:SHA256\s*\([^)]*\)\s*=\s*)?([a-fA-F0-9]{64})", lines[0], re.I)
+        if m:
+            return m.group(1).lower()
+    raise RuntimeError(f"Release 校验文件里没有 {filename} 对应的 SHA-256。")
 
-def _safe_extract_update(data: bytes, expected_sha: str, root: Path, ui):
+def _safe_member(name):
+    raw = str(name).replace("\\", "/")
+    if not raw or raw.startswith("/") or re.match(r"^[A-Za-z]:", raw):
+        return None
+    p = PurePosixPath(raw)
+    if any(part in ("", ".", "..") for part in p.parts):
+        return None
+    if p.parts and p.parts[0] in PROTECTED:
+        return None
+    return p
+
+def _extract_verified(data: bytes, expected_sha: str, stage: Path):
     actual = hashlib.sha256(data).hexdigest()
     if actual.lower() != expected_sha.lower():
         raise RuntimeError(f"更新包校验不一致，拒绝更新（{actual[:12]} != {expected_sha[:12]}）。")
-    with tempfile.TemporaryDirectory(prefix="fly-update-") as td:
-        tdir = Path(td)
-        with zipfile.ZipFile(io.BytesIO(data)) as zf:
-            bad = [n for n in zf.namelist() if Path(n).is_absolute() or ".." in Path(n).parts]
-            if bad:
-                raise RuntimeError("更新包内发现不安全路径，已拒绝。")
-            zf.extractall(tdir)
-        entries = [p for p in tdir.iterdir()]
-        top = entries[0] if len(entries)==1 and entries[0].is_dir() else tdir
-        if not (top / "main.py").exists() or not (top / "VERSION").exists():
-            raise RuntimeError("更新包缺少必要的程序文件。")
-        for src in top.rglob("*"):
-            rel = src.relative_to(top)
-            if rel.parts and rel.parts[0] in PROTECTED:
-                continue
-            dst = root / rel
-            if src.is_dir():
+    stage.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(io.BytesIO(data)) as zf:
+        for info in zf.infolist():
+            rel = _safe_member(info.filename)
+            if rel is None:
+                raise RuntimeError(f"更新包内发现不安全路径：{info.filename!r}")
+            dst = stage.joinpath(*rel.parts)
+            if info.is_dir():
                 dst.mkdir(parents=True, exist_ok=True)
-            else:
-                dst.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(src, dst)
-    ui.log("更新包 SHA-256 校验通过。")
+                continue
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            with zf.open(info, "r") as src, open(dst, "wb") as out:
+                shutil.copyfileobj(src, out)
+    # tolerate a single wrapper directory produced by some archive tools
+    entries = list(stage.iterdir())
+    if len(entries) == 1 and entries[0].is_dir():
+        return entries[0]
+    return stage
 
-OBSOLETE = ["START_FLY.bat","LAUNCHER.bat","INSTALL_CORE.bat","start_fly.py",
-            "FLY.exe","launcher.spec","FLY.spec","scripts/INSTALL_CORE.ps1",
-            "optional/wnacg.json","optional/gdmusic.json","optional/annas.json"]
+def _read_manifest(top: Path):
+    manifest = top / "update-manifest.json"
+    if not manifest.exists():
+        # Backward-compatible fallback; directory replacement still removes
+        # stale modules even if an older package lacks a manifest.
+        return {"managed_dirs": list(MANAGED_DIRS), "managed_root": list(MANAGED_ROOT)}
+    try:
+        data = json.loads(manifest.read_text(encoding="utf-8-sig"))
+    except Exception as e:
+        raise RuntimeError(f"更新清单损坏：{e}") from e
+    dirs = [x for x in data.get("managed_dirs", []) if x in MANAGED_DIRS]
+    roots = [x for x in data.get("managed_root", []) if x in MANAGED_ROOT]
+    return {"managed_dirs": dirs or list(MANAGED_DIRS),
+            "managed_root": roots or list(MANAGED_ROOT)}
+
+def _copy_path(src: Path, dst: Path):
+    if src.is_dir():
+        shutil.copytree(src, dst, dirs_exist_ok=True)
+    elif src.exists():
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dst)
+
+def _remove_path(path: Path):
+    if path.is_dir():
+        shutil.rmtree(path, ignore_errors=False)
+    elif path.exists():
+        path.unlink()
+
+def _atomic_file_copy(src: Path, dst: Path):
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(dst.parent), prefix=f".{dst.name}.", suffix=".new")
+    os.close(fd)
+    try:
+        shutil.copy2(src, tmp)
+        os.replace(tmp, dst)
+    except BaseException:
+        try: Path(tmp).unlink(missing_ok=True)
+        except OSError: pass
+        raise
+
+def _snapshot(root: Path, backup: Path, manifest):
+    backup.mkdir(parents=True, exist_ok=True)
+    for name in manifest["managed_dirs"]:
+        src = root / name
+        if src.exists():
+            _copy_path(src, backup / name)
+    for name in list(manifest["managed_root"]) + ["VERSION"]:
+        src = root / name
+        if src.exists():
+            _copy_path(src, backup / name)
+
+def _restore_snapshot(root: Path, backup: Path, manifest):
+    for name in manifest["managed_dirs"]:
+        dst = root / name
+        if dst.exists(): _remove_path(dst)
+        src = backup / name
+        if src.exists(): _copy_path(src, dst)
+    for name in list(manifest["managed_root"]) + ["VERSION"]:
+        dst = root / name
+        if dst.exists(): _remove_path(dst)
+        src = backup / name
+        if src.exists(): _copy_path(src, dst)
+
+def recover_interrupted_update(root: Path, ui=None):
+    txn = root / "runtime" / TXN_NAME
+    journal = txn / "journal.json"
+    if not journal.exists():
+        return False
+    try:
+        data = json.loads(journal.read_text(encoding="utf-8-sig"))
+        manifest = data.get("manifest") or {"managed_dirs":list(MANAGED_DIRS),"managed_root":list(MANAGED_ROOT)}
+        backup = txn / "backup"
+        if data.get("state") == "committing" and backup.exists():
+            if ui: ui.log("检测到上次更新中断，正在回滚到更新前版本...")
+            _restore_snapshot(root, backup, manifest)
+        shutil.rmtree(txn, ignore_errors=True)
+        if ui: ui.log("更新恢复完成。")
+        return True
+    except Exception as e:
+        if ui: ui.log(f"更新恢复失败：{e}")
+        return False
+
+def _transactional_install(top: Path, root: Path, ui):
+    if not (top/"main.py").exists() or not (top/"VERSION").exists():
+        raise RuntimeError("更新包缺少 main.py 或 VERSION。")
+    manifest = _read_manifest(top)
+    txn = root / "runtime" / TXN_NAME
+    if txn.exists():
+        shutil.rmtree(txn, ignore_errors=True)
+    backup = txn / "backup"
+    txn.mkdir(parents=True, exist_ok=True)
+    _snapshot(root, backup, manifest)
+    journal = txn / "journal.json"
+    journal.write_text(json.dumps({"state":"committing","manifest":manifest},
+                                  ensure_ascii=False, indent=2), encoding="utf-8")
+    try:
+        # Replace managed directories wholesale so upstream-deleted modules
+        # cannot survive indefinitely on user machines.
+        for name in manifest["managed_dirs"]:
+            src, dst = top/name, root/name
+            if dst.exists(): _remove_path(dst)
+            if src.exists(): _copy_path(src, dst)
+        for name in manifest["managed_root"]:
+            src, dst = top/name, root/name
+            if src.exists():
+                _atomic_file_copy(src, dst)
+            elif dst.exists():
+                _remove_path(dst)
+        # VERSION is the commit marker and is written last.
+        _atomic_file_copy(top/"VERSION", root/"VERSION")
+        journal.write_text(json.dumps({"state":"complete","manifest":manifest}),
+                           encoding="utf-8")
+        shutil.rmtree(txn, ignore_errors=True)
+    except BaseException:
+        try:
+            _restore_snapshot(root, backup, manifest)
+        finally:
+            shutil.rmtree(txn, ignore_errors=True)
+        raise
+    for name in OBSOLETE:
+        try:
+            p = root / name
+            if p.exists(): _remove_path(p)
+        except OSError:
+            pass
+    ui.log("更新事务提交完成；旧模块已按清单清理。")
 
 def apply_release_update(root: Path, assets, ui):
     zip_url = assets.get(UPDATE_ASSET)
     sum_url = assets.get(CHECKSUM_ASSET)
     if not zip_url or not sum_url:
-        raise RuntimeError(
-            f"最新 Release 缺少可验证的更新文件对（{UPDATE_ASSET} + {CHECKSUM_ASSET}），保持当前版本不变。"
-        )
+        raise RuntimeError(f"最新 Release 缺少 {UPDATE_ASSET} + {CHECKSUM_ASSET}。")
     ui.log("正在从 GitHub Release 下载更新包...")
-    expected = _parse_sha256(fetch(sum_url, ui))
+    expected = _parse_sha256(fetch(sum_url, ui), UPDATE_ASSET)
     data = fetch(zip_url, ui)
-    _safe_extract_update(data, expected, root, ui)
-    for name in OBSOLETE:
-        try:
-            p=root/name
-            if p.is_file(): p.unlink()
-        except OSError:
-            pass
+    with tempfile.TemporaryDirectory(dir=str(root/"runtime"), prefix="fly-stage-") as td:
+        top = _extract_verified(data, expected, Path(td))
+        _transactional_install(top, root, ui)
 
 def find_python():
     py=shutil.which("py")
@@ -142,50 +288,47 @@ def windowless(python_cmd):
     return list(python_cmd), False
 
 def install_python(ui):
-    ui.status(f"正在从 python.org 下载 Python {PYTHON_VERSION}（约 26MB）...")
+    ui.status(f"正在从 python.org 下载 Python {PYTHON_VERSION}...")
     tmp=Path(tempfile.mkdtemp(prefix="fly-python-"))
     exe=tmp/f"python-{PYTHON_VERSION}-amd64.exe"
     try:
         data=fetch(PYTHON_URLS[0],ui)
-    except Exception as e:
-        ui.log(f"Python 下载失败：{e}"); return None
-    exe.write_bytes(data)
-    ui.status("正在静默安装 Python（约 1-2 分钟，请勿关闭窗口）...")
-    ui.progress(None)
-    r=subprocess.run([str(exe),"/quiet","InstallAllUsers=0","PrependPath=1",
-                      "Include_launcher=1","InstallLauncherAllUsers=0",
-                      "Include_tcltk=1","Include_test=0","Include_doc=0",
-                      "Include_dev=0","Include_idle=0","Include_pip=0",
-                      "AssociateFiles=0","Shortcuts=0"],
-                     timeout=900,creationflags=getattr(subprocess,"CREATE_NO_WINDOW",0))
-    if r.returncode != 0:
-        ui.log(f"Python 安装程序返回错误码 {r.returncode}。"); return None
-    return find_python()
-
-CORE_API="https://api.github.com/repos/MetaCubeX/mihomo/releases/latest"
-CORE_PATTERNS=(r"^mihomo-windows-amd64-v1-v[0-9].*\.zip$",r"^mihomo-windows-amd64.*\.zip$")
-
-CORE_SUM_HINTS=("sha256","sha512","checksum","sums","digest")
+        exe.write_bytes(data)
+        ui.status("正在静默安装 Python...")
+        ui.progress(None)
+        r=subprocess.run([str(exe),"/quiet","InstallAllUsers=0","PrependPath=1",
+                          "Include_launcher=1","InstallLauncherAllUsers=0",
+                          "Include_tcltk=1","Include_test=0","Include_doc=0",
+                          "Include_dev=0","Include_idle=0","Include_pip=0",
+                          "AssociateFiles=0","Shortcuts=0"],
+                         timeout=900,creationflags=getattr(subprocess,"CREATE_NO_WINDOW",0))
+        if r.returncode != 0:
+            ui.log(f"Python 安装程序返回错误码 {r.returncode}。")
+            return None
+        return find_python()
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 def _sha_for(text,filename):
     lines=[x.strip() for x in str(text).splitlines() if x.strip()]
     for line in lines:
         m=re.match(r"^([0-9a-fA-F]{64})[\s*]+(.+)$",line)
-        if m and Path(m.group(2).strip()).name==filename: return m.group(1).lower()
+        if m and PurePosixPath(m.group(2).replace("\\","/").strip()).name==filename:
+            return m.group(1).lower()
     if len(lines)==1:
         m=re.search(r"\b([0-9a-fA-F]{64})\b",lines[0])
         if m: return m.group(1).lower()
     return None
 
-def _core_expected_sha(data,asset,ui):
-    """校验基准只从官方 Release 取；拿不到就返回 None。"""
+def _core_expected_sha(data,asset):
     digest=str(asset.get("digest") or "")
     if digest.lower().startswith("sha256:"):
         v=digest.split(":",1)[1].strip().lower()
         if re.fullmatch(r"[0-9a-f]{64}",v): return v
     for other in data.get("assets",[]):
         n=str(other.get("name",""))
-        if n==asset.get("name") or not any(h in n.lower() for h in CORE_SUM_HINTS): continue
+        if n==asset.get("name") or not any(h in n.lower() for h in CORE_SUM_HINTS):
+            continue
         try: blob=fetch(other["browser_download_url"])
         except Exception: continue
         sha=_sha_for(blob.decode("utf-8",errors="replace"),asset.get("name",""))
@@ -194,8 +337,9 @@ def _core_expected_sha(data,asset,ui):
 
 def ensure_core(root: Path, ui):
     core=root/"core"/"mihomo.exe"
-    if core.exists(): return
-    ui.status("正在从 MetaCubeX 官方 Release 下载加速内核（约 21MB）...")
+    if core.exists() and core.stat().st_size > 1024*1024:
+        return
+    ui.status(f"正在下载已验证兼容的 Mihomo {CORE_VERSION}...")
     ui.progress(None)
     data=json.loads(fetch(CORE_API,ui).decode("utf-8",errors="replace"))
     asset=None
@@ -203,25 +347,30 @@ def ensure_core(root: Path, ui):
         asset=next((a for a in data.get("assets",[]) if re.match(pat,a.get("name",""))),None)
         if asset: break
     if not asset: raise RuntimeError("未找到兼容的 Mihomo Windows 安装包。")
-    expected=_core_expected_sha(data,asset,ui)
+    expected=_core_expected_sha(data,asset)
+    if not expected:
+        raise RuntimeError("官方 Mihomo Release 未提供可验证 SHA-256，已拒绝安装。")
     blob=fetch(asset["browser_download_url"],ui)
     actual=hashlib.sha256(blob).hexdigest()
-    if expected and actual!=expected:
-        raise RuntimeError(f"内核完整性校验失败，已拒绝安装（{actual[:12]}... != {expected[:12]}...）。")
-    ui.log("内核完整性校验通过。" if expected else "内核已从官方源下载（上游未提供校验值）。")
+    if actual!=expected:
+        raise RuntimeError(f"内核完整性校验失败，已拒绝安装（{actual[:12]} != {expected[:12]}）。")
     with zipfile.ZipFile(io.BytesIO(blob)) as zf:
         name=next((n for n in zf.namelist() if re.search(r"mihomo.*\.exe$",n)),None)
         if not name: raise RuntimeError("Mihomo 安装包里没有可执行文件。")
-        core.parent.mkdir(parents=True,exist_ok=True)
-        fd,tmp=tempfile.mkstemp(dir=str(core.parent),prefix=".mihomo-",suffix=".part")
-        try:
-            with os.fdopen(fd,"wb") as f: f.write(zf.read(name))
-            os.replace(tmp,core)
-        except BaseException:
-            Path(tmp).unlink(missing_ok=True); raise
-    ui.log("加速内核安装完成。")
+        payload=zf.read(name)
+    core.parent.mkdir(parents=True,exist_ok=True)
+    fd,tmp=tempfile.mkstemp(dir=str(core.parent),prefix=".mihomo-",suffix=".part")
+    try:
+        with os.fdopen(fd,"wb") as f:
+            f.write(payload); f.flush(); os.fsync(f.fileno())
+        os.replace(tmp,core)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True); raise
+    ui.log(f"Mihomo {CORE_VERSION} 完整性校验通过并安装完成。")
 
 def run_flow(root: Path, ui):
+    (root/"runtime").mkdir(parents=True, exist_ok=True)
+    recover_interrupted_update(root, ui)
     ui.status("正在检查 GitHub Release 更新...")
     cur=local_version(root)
     try:
@@ -236,7 +385,7 @@ def run_flow(root: Path, ui):
         ui.log(f"更新已安全跳过：{e}")
 
     if not (root/"main.py").exists():
-        raise RuntimeError("缺少程序文件 main.py，首次运行需要能访问 GitHub Release，请检查网络后重试。")
+        raise RuntimeError("缺少程序文件 main.py，首次运行需要访问 GitHub Release。")
     ui.status("检查运行环境...")
     ui.progress(None)
     py=find_python()
@@ -244,7 +393,7 @@ def run_flow(root: Path, ui):
     if not py:
         try: webbrowser.open("https://www.python.org/downloads/")
         except Exception: pass
-        raise RuntimeError('自动安装 Python 失败。已打开官网下载页，请手动安装（勾选 "Add python.exe to PATH"）后重新运行本程序。')
+        raise RuntimeError('自动安装 Python 失败，请手动安装后重新运行。')
     try:
         ensure_core(root,ui)
     except Exception as e:
@@ -308,7 +457,9 @@ class LauncherApp(tk.Tk):
         self.after(100,self.poll)
 
     def _append(self,s):
-        self.logbox.configure(state="normal"); self.logbox.insert("end",s+"\n"); self.logbox.see("end"); self.logbox.configure(state="disabled")
+        self.logbox.configure(state="normal")
+        self.logbox.insert("end",s+"\n"); self.logbox.see("end")
+        self.logbox.configure(state="disabled")
 
 if __name__=="__main__":
     LauncherApp().mainloop()
