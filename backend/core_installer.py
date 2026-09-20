@@ -1,33 +1,93 @@
-"""Downloads the latest mihomo core into core/mihomo.exe.
+"""Install and verify the pinned Mihomo core without executing untrusted code.
 
-安全前提：这个 exe 会被直接执行，TUN 配置下还是以管理员身份跑的。
-所以校验链必须扎根在官方源上——
-
-  1. release 元数据只认 api.github.com 直连；镜像给的元数据里的 digest
-     无法自证，等于没有校验值。
-  2. 拿到官方校验基准（asset digest 或同一 release 里的校验文件）后，
-     zip 本体可以走任意镜像，下载完按 sha256 比对，不一致就换下一个源。
-  3. 拿不到任何校验基准时，只接受官方直连下载，绝不接受镜像的二进制。
+FLY pins one exact official GitHub asset.  The archive SHA-256 is embedded in
+the application and the verified archive is retained next to mihomo.exe.  At
+runtime we can therefore compare the executable with the copy inside that
+trusted archive before executing it, instead of using `mihomo -v` as a
+security check.
 """
 from __future__ import annotations
-import hashlib, io, json, os, re, tempfile, urllib.request, zipfile
+import hashlib, io, os, tempfile, urllib.request, zipfile
+from dataclasses import dataclass
 from pathlib import Path
 
 CORE_VERSION = "v1.19.31"
-MIRRORS = [""]  # official GitHub only; do not execute binaries supplied by third-party mirrors
-API = f"https://api.github.com/repos/MetaCubeX/mihomo/releases/tags/{CORE_VERSION}"
-ASSET_PATTERNS = (r"^mihomo-windows-amd64-v1-v[0-9].*\.zip$", r"^mihomo-windows-amd64.*\.zip$")
-CHECKSUM_HINTS = ("sha256", "sha512", "checksum", "sums", "digest")
+CORE_ASSET_NAME = "mihomo-windows-amd64-v1-v1.19.31.zip"
+CORE_ZIP_SHA256 = "d89c9bd746e8aacff89b2edf674813e25e8bd2dc565f4e12dc3b4526dd2b3177"
+CORE_DOWNLOAD_URL = (
+    f"https://github.com/MetaCubeX/mihomo/releases/download/{CORE_VERSION}/{CORE_ASSET_NAME}"
+)
+CORE_ARCHIVE_FILENAME = "mihomo-verified.zip"
+MIRRORS = [""]  # compatibility constant: trusted core downloads are official-only
+
+VALID = "valid"
+MISSING = "missing"
+REPAIRABLE = "repairable"
+INVALID = "invalid"
+TRANSIENT = "transient"
 
 class CoreVerifyError(RuntimeError):
-    """下载到的内核无法通过完整性校验。"""
+    """The downloaded or local core failed trusted integrity verification."""
 
-def _source_name(prefix):
-    return "官方直连" if not prefix else "镜像 " + prefix.split("/")[2]
+@dataclass(frozen=True)
+class CoreInspection:
+    state: str
+    detail: str = ""
 
-def _get(url, prefix="", timeout=30, log=None, progress_tag=None):
-    req = urllib.request.Request(prefix + url, headers={
-        "User-Agent": "FLY-Core-Installer", "Accept": "application/vnd.github+json"})
+def core_archive_path(paths) -> Path:
+    return paths.core_exe.parent / CORE_ARCHIVE_FILENAME
+
+def _sha256_bytes(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+def _sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with Path(path).open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+def _verified_archive_bytes(blob: bytes) -> bytes:
+    actual = _sha256_bytes(blob)
+    if actual.lower() != CORE_ZIP_SHA256.lower():
+        raise CoreVerifyError(
+            f"Mihomo 归档 SHA-256 不匹配（期望 {CORE_ZIP_SHA256[:12]}...，"
+            f"实际 {actual[:12]}...）。")
+    return blob
+
+def _extract_exe(blob: bytes) -> bytes:
+    try:
+        with zipfile.ZipFile(io.BytesIO(blob)) as zf:
+            names = [n for n in zf.namelist()
+                     if Path(n.replace("\\", "/")).name.lower().startswith("mihomo")
+                     and n.lower().endswith(".exe")]
+            if len(names) != 1:
+                raise CoreVerifyError("可信归档里没有唯一的 mihomo.exe。")
+            data = zf.read(names[0])
+    except zipfile.BadZipFile as e:
+        raise CoreVerifyError("Mihomo 归档不是有效 ZIP。") from e
+    if len(data) < 1024 * 1024 or data[:2] != b"MZ":
+        raise CoreVerifyError("Mihomo 可执行文件结构异常。")
+    return data
+
+def _write_atomic(target: Path, data: bytes):
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(target.parent), prefix=f".{target.name}.", suffix=".part")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, target)
+    except PermissionError as e:
+        Path(tmp).unlink(missing_ok=True)
+        raise RuntimeError(f"{target.name} 正在被占用，无法替换；请先停止加速。") from e
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+
+def _get(url, timeout=60, log=None, progress_tag=None):
+    req = urllib.request.Request(url, headers={"User-Agent": "FLY-Core-Installer"})
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     with opener.open(req, timeout=timeout) as resp:
         total = int(resp.headers.get("Content-Length") or 0)
@@ -44,114 +104,89 @@ def _get(url, prefix="", timeout=30, log=None, progress_tag=None):
                     log(f"{progress_tag} {pct}%  ({done // 1048576}MB / {total // 1048576}MB)")
         return buf.getvalue()
 
-def _fetch(url, log, timeout=30, progress_tag=None, sources=None):
-    """按顺序尝试各个源；返回 (内容, 使用的源前缀)。"""
-    last = None
-    for prefix in (MIRRORS if sources is None else sources):
-        try:
-            return _get(url, prefix, timeout, log, progress_tag), prefix
-        except Exception as e:
-            log(f"[CORE] {_source_name(prefix)} 失败：{e}")
-            last = e
-    raise last or RuntimeError("no source available")
+def _fetch(url, log, timeout=60, progress_tag=None, sources=None):
+    # Kept compatible with existing test injection points; sources other than
+    # official direct are intentionally rejected.
+    if sources not in (None, [""], ("",)):
+        raise CoreVerifyError("Mihomo 内核只允许从官方 GitHub 直连下载。")
+    return _get(url, timeout=timeout, log=log, progress_tag=progress_tag), ""
 
-def find_sha256(text, filename):
-    """从校验文件里找出某个文件名对应的 sha256。"""
-    lines = [x.strip() for x in str(text).splitlines() if x.strip()]
-    for line in lines:
-        m = re.match(r"^([0-9a-fA-F]{64})[\s*]+(.+)$", line)
-        if m and Path(m.group(2).strip()).name == filename:
-            return m.group(1).lower()
-    if len(lines) == 1:                      # 单文件校验，只有一个裸 hash
-        m = re.search(r"\b([0-9a-fA-F]{64})\b", lines[0])
-        if m:
-            return m.group(1).lower()
-    return None
+def inspect_core(paths) -> CoreInspection:
+    """Verify the installed exe against the retained, pinned official archive.
 
-def expected_sha256(release, asset, log, fetch=None):
-    """返回 (sha256, 来源说明)；拿不到就是 (None, "")。只走官方直连。"""
-    fetch = fetch or (lambda url: _fetch(url, log, timeout=20, sources=[""])[0])
-    digest = str(asset.get("digest") or "")
-    if digest.lower().startswith("sha256:"):
-        value = digest.split(":", 1)[1].strip().lower()
-        if re.fullmatch(r"[0-9a-f]{64}", value):
-            return value, "GitHub asset digest"
-    name = asset.get("name", "")
-    for other in release.get("assets", []):
-        other_name = str(other.get("name", ""))
-        if other_name == name or not any(h in other_name.lower() for h in CHECKSUM_HINTS):
-            continue
-        try:
-            blob = fetch(other["browser_download_url"])
-        except Exception as e:
-            log(f"[CORE] 校验文件 {other_name} 获取失败：{e}")
-            continue
-        sha = find_sha256(blob.decode("utf-8", errors="replace"), name)
-        if sha:
-            return sha, f"校验文件 {other_name}"
-    return None, ""
-
-def _write_atomic(target: Path, data: bytes):
-    target.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=str(target.parent), prefix=".mihomo-", suffix=".part")
+    No executable is launched here.  Permission/sharing failures are transient;
+    mismatched bytes are invalid; a trusted archive with a missing/corrupt exe
+    is repairable without network access.
+    """
+    exe = Path(paths.core_exe)
+    archive = core_archive_path(paths)
+    if not exe.exists() and not archive.exists():
+        return CoreInspection(MISSING, "未安装 Mihomo 内核。")
+    if not archive.exists():
+        return CoreInspection(INVALID, "缺少可信 Mihomo 归档，无法证明现有 exe 的来源。")
     try:
-        with os.fdopen(fd, "wb") as f:
-            f.write(data)
-        os.replace(tmp, target)
-    except PermissionError as e:
-        Path(tmp).unlink(missing_ok=True)
-        raise RuntimeError("内核正在运行，无法替换，请先停止加速后再试。") from e
-    except BaseException:
-        Path(tmp).unlink(missing_ok=True)
-        raise
+        blob = archive.read_bytes()
+        _verified_archive_bytes(blob)
+        trusted_exe = _extract_exe(blob)
+        trusted_hash = _sha256_bytes(trusted_exe)
+    except (PermissionError, OSError) as e:
+        return CoreInspection(TRANSIENT, f"暂时无法读取可信归档：{e}")
+    except CoreVerifyError as e:
+        return CoreInspection(INVALID, str(e))
+
+    if not exe.exists():
+        return CoreInspection(REPAIRABLE, "exe 缺失，但可信归档完整，可离线修复。")
+    try:
+        st = exe.stat()
+        if st.st_size != len(trusted_exe):
+            return CoreInspection(REPAIRABLE, "exe 大小与可信归档不一致，可离线修复。")
+        if _sha256_file(exe) != trusted_hash:
+            return CoreInspection(REPAIRABLE, "exe 内容与可信归档不一致，可离线修复。")
+        with exe.open("rb") as fh:
+            if fh.read(2) != b"MZ":
+                return CoreInspection(REPAIRABLE, "exe 头部异常，可离线修复。")
+    except (PermissionError, OSError) as e:
+        return CoreInspection(TRANSIENT, f"暂时无法读取 mihomo.exe：{e}")
+    return CoreInspection(VALID, f"{CORE_VERSION} 完整性验证通过。")
+
+def repair_from_archive(paths, log=lambda m: None) -> bool:
+    """Repair mihomo.exe from the pinned local archive without network access."""
+    archive = core_archive_path(paths)
+    if not archive.exists():
+        return False
+    try:
+        blob = _verified_archive_bytes(archive.read_bytes())
+        exe_bytes = _extract_exe(blob)
+        _write_atomic(paths.core_exe, exe_bytes)
+        log("[CORE] 已从本地可信归档修复 mihomo.exe。")
+        return True
+    except CoreVerifyError:
+        return False
 
 def install_core(paths, log, fetch=None):
+    """Install the exact pinned official Mihomo asset and retain its archive."""
     fetch = fetch or _fetch
-    log(f"[CORE] 获取已验证兼容版本 mihomo {CORE_VERSION}（仅官方源）...")
+
+    # Prefer the already verified local archive. This also repairs an exe that
+    # was deleted/quarantined by antivirus without requiring Internet access.
+    if repair_from_archive(paths, log):
+        return
+
+    log(f"[CORE] 下载固定内核 {CORE_VERSION} / {CORE_ASSET_NAME}（官方 GitHub）...")
     try:
-        meta, _prefix = fetch(API, log, timeout=20, sources=[""])
+        blob, _ = fetch(CORE_DOWNLOAD_URL, log, timeout=90,
+                        progress_tag="[CORE]", sources=[""])
     except Exception as e:
-        # 镜像给的元数据里 digest 是它自己写的，无法自证，所以宁可不装
         raise RuntimeError(
-            "无法从 GitHub 官方接口获取版本信息；出于安全考虑不会改用镜像下载内核。\n"
-            "可以稍后重试，或手动安装：\n"
-            f"  1. 打开 https://github.com/MetaCubeX/mihomo/releases/tag/{CORE_VERSION}\n"
-            "  2. 下载 mihomo-windows-amd64-<版本>.zip（不要用 go120/compatible 之外的变体）\n"
-            f"  3. 解压出的 exe 改名放到 {paths.core_exe}\n"
-            f"注意必须是 {CORE_VERSION}，FLY 启动时会校验内核自报的版本。\n"
-            f"（原因：{e}）") from e
-    release = json.loads(meta.decode("utf-8", errors="replace"))
+            "无法下载固定 Mihomo 内核。可以稍后重试，或手动把精确归档 "
+            f"{CORE_ASSET_NAME} 保存为 {core_archive_path(paths)}。\n"
+            f"官方地址：{CORE_DOWNLOAD_URL}\n原因：{e}") from e
 
-    asset = None
-    for pat in ASSET_PATTERNS:
-        asset = next((a for a in release.get("assets", []) if re.match(pat, a.get("name", ""))), None)
-        if asset:
-            break
-    if not asset:
-        raise RuntimeError("未找到 Windows AMD64 版本的 mihomo。")
+    _verified_archive_bytes(blob)
+    exe_bytes = _extract_exe(blob)
 
-    sha, origin = expected_sha256(release, asset, log,
-                                  fetch=lambda url: fetch(url, log, timeout=20, sources=[""])[0])
-    if not sha:
-        raise CoreVerifyError("官方 Release 未提供可验证的 SHA-256，已拒绝安装内核。")
-    log(f"[CORE] 校验基准：{origin}（sha256 {sha[:12]}...）。")
-    sources = [""]
-
-    log(f"[CORE] 下载 {asset['name']} ...")
-    blob, used = fetch(asset["browser_download_url"], log, timeout=60,
-                       progress_tag="[CORE]", sources=sources)
-    actual = hashlib.sha256(blob).hexdigest()
-    if sha and actual != sha:
-        raise CoreVerifyError(
-            f"内核校验失败，已拒绝安装（来源：{_source_name(used)}；"
-            f"期望 {sha[:12]}... 实际 {actual[:12]}...）。")
-    log(f"[CORE] 完整性校验通过（{_source_name(used)}，sha256 {actual[:12]}...）。"
-        if sha else f"[CORE] 官方直连下载完成（sha256 {actual[:12]}...）。")
-
-    with zipfile.ZipFile(io.BytesIO(blob)) as zf:
-        name = next((n for n in zf.namelist() if re.search(r"mihomo.*\.exe$", n)), None)
-        if not name:
-            raise RuntimeError("安装包里没有 mihomo.exe。")
-        exe_bytes = zf.read(name)
+    # Write the trust anchor archive first, then the executable. A crash between
+    # the two leaves a repairable state that inspect_core() can recover.
+    _write_atomic(core_archive_path(paths), blob)
     _write_atomic(paths.core_exe, exe_bytes)
-    log(f"[CORE] 内核安装完成（{len(exe_bytes) // 1048576}MB）。")
+    log(f"[CORE] {CORE_VERSION} 安装完成；归档与 exe 均已通过固定 SHA-256 校验。")
