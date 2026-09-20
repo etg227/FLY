@@ -314,10 +314,13 @@ def _normalize_profile(rule, source="builtin"):
     r = dict(rule)
     pid = str(r.get("id", "") or "").strip()
     r["id"] = pid if _ID_RE.fullmatch(pid) else ""
-    r["name"] = str(r.get("name", r["id"]) or "").strip()
+    r["name"] = re.sub(r"[\r\n\t]+", " ", str(r.get("name", r["id"]) or "")).strip()[:120]
     r["source"] = source
     r["sort"] = _safe_int(r.get("sort", 99), 99, -100000, 100000)
-    r["category"] = str(r.get("category") or ("Games" if source == "builtin" else "Custom")).strip()
+    r["category"] = re.sub(
+        r"[\r\n\t]+", " ",
+        str(r.get("category") or ("Games" if source == "builtin" else "Custom"))
+    ).strip()[:80]
     mode = str(r.get("launch_mode", "browser") or "browser").strip().lower()
     r["launch_mode"] = mode if mode in ("browser", "tun") else "browser"
 
@@ -438,16 +441,25 @@ def profile_from_url(raw_url, name=""):
         raise ValueError("网址不能为空。")
     if "://" not in raw:
         raw = "https://" + raw
-    host = _idna_host(urlparse(raw).hostname or "")
+    parsed = urlparse(raw)
+    if parsed.scheme.lower() not in ("http", "https"):
+        raise ValueError("只支持 http:// 或 https:// 网站。")
+    host = _idna_host(parsed.hostname or "")
     if not host or "." not in host:
         raise ValueError("无法从输入中解析出有效域名。")
     domain = registrable_domain(host)
-    pid = re.sub(r"[^a-z0-9]+", "-", domain).strip("-")[:48]
-    if not pid:
-        pid = "site-" + hashlib.sha256(domain.encode("utf-8")).hexdigest()[:12]
+    slug = re.sub(r"[^a-z0-9]+", "-", domain).strip("-")
+    digest = hashlib.sha256(domain.encode("utf-8")).hexdigest()[:12]
+    if not slug:
+        pid = "site-" + digest
+    elif len(slug) > 48:
+        pid = slug[:35].rstrip("-") + "-" + digest
+    else:
+        pid = slug
+    display = re.sub(r"[\r\n\t]+", " ", str(name)).strip()[:120]
     return {
         "id": pid,
-        "name": str(name).strip() or domain,
+        "name": display or domain,
         "category": "Custom",
         "launch_mode": "browser",
         "url": f"https://{host}/",
