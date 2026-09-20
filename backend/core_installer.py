@@ -13,8 +13,9 @@ from __future__ import annotations
 import hashlib, io, json, os, re, tempfile, urllib.request, zipfile
 from pathlib import Path
 
-MIRRORS = ["", "https://ghproxy.net/", "https://gh-proxy.com/"]
-API = "https://api.github.com/repos/MetaCubeX/mihomo/releases/latest"
+CORE_VERSION = "v1.19.31"
+MIRRORS = [""]  # official GitHub only; do not execute binaries supplied by third-party mirrors
+API = f"https://api.github.com/repos/MetaCubeX/mihomo/releases/tags/{CORE_VERSION}"
 ASSET_PATTERNS = (r"^mihomo-windows-amd64-v1-v[0-9].*\.zip$", r"^mihomo-windows-amd64.*\.zip$")
 CHECKSUM_HINTS = ("sha256", "sha512", "checksum", "sums", "digest")
 
@@ -105,7 +106,7 @@ def _write_atomic(target: Path, data: bytes):
 
 def install_core(paths, log, fetch=None):
     fetch = fetch or _fetch
-    log("[CORE] 获取 mihomo 最新版本信息（仅官方源）...")
+    log(f"[CORE] 获取已验证兼容版本 mihomo {CORE_VERSION}（仅官方源）...")
     try:
         meta, _prefix = fetch(API, log, timeout=20, sources=[""])
     except Exception as e:
@@ -126,12 +127,10 @@ def install_core(paths, log, fetch=None):
 
     sha, origin = expected_sha256(release, asset, log,
                                   fetch=lambda url: fetch(url, log, timeout=20, sources=[""])[0])
-    if sha:
-        log(f"[CORE] 校验基准：{origin}（sha256 {sha[:12]}...），下载可走镜像。")
-        sources = MIRRORS
-    else:
-        log("[CORE] 上游未提供可验证的校验值——本次只接受官方直连下载，不使用镜像。")
-        sources = [""]
+    if not sha:
+        raise CoreVerifyError("官方 Release 未提供可验证的 SHA-256，已拒绝安装内核。")
+    log(f"[CORE] 校验基准：{origin}（sha256 {sha[:12]}...）。")
+    sources = [""]
 
     log(f"[CORE] 下载 {asset['name']} ...")
     blob, used = fetch(asset["browser_download_url"], log, timeout=60,
