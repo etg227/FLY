@@ -30,6 +30,11 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Compile Python sources
+        shell: pwsh
+        run: |
+          python -m compileall -q main.py launcher.py backend tests
+
       - name: Run regression tests
         shell: pwsh
         run: |
