@@ -230,7 +230,8 @@ def load_app_settings(paths):
     # Persist normalization/migration so a malformed setting cannot keep
     # re-triggering problems on every launch.
     normalized_keys = set(DEFAULT_APP_SETTINGS)
-    if changed or any(raw.get(k) != data.get(k) for k in normalized_keys):
+    if (changed or set(raw.keys()) != normalized_keys or
+            any(raw.get(k) != data.get(k) for k in normalized_keys)):
         save_json(paths.app_settings, data)
     return data
 
