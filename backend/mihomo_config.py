@@ -199,6 +199,8 @@ def build_runtime_config(paths: Paths, profile_ids, log=None):
         "proxy-groups:",
         "  - name: FLY-JP",
         "    type: select",
+        "    proxies:",
+        "      - REJECT",
         "    use:",
     ]
     lines += [f"      - {n}" for n in provider_names]
