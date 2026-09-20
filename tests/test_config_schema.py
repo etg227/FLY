@@ -100,6 +100,11 @@ class CustomUrlTests(unittest.TestCase):
     def test_shared_host_is_not_widened(self):
         self.assertEqual(registrable_domain("user.github.io"), "user.github.io")
         self.assertEqual(registrable_domain("foo.pages.dev"), "foo.pages.dev")
+        self.assertEqual(registrable_domain("bucket.s3.amazonaws.com"), "bucket.s3.amazonaws.com")
+
+    def test_normal_www_host_covers_same_site_subdomains(self):
+        self.assertEqual(registrable_domain("www.wnacg.com"), "wnacg.com")
+        self.assertEqual(registrable_domain("api.example.co.jp"), "example.co.jp")
 
 class ValidateProfileTests(unittest.TestCase):
     def test_reports_injection_and_semantic_errors(self):
