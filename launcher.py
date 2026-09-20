@@ -27,12 +27,15 @@ TXN_NAME = "update-txn"
 PYTHON_VERSION = "3.12.10"
 PYTHON_URLS = [f"https://www.python.org/ftp/python/{PYTHON_VERSION}/python-{PYTHON_VERSION}-amd64.exe"]
 
-# 版本号的唯一真相在 backend/core_installer.py；此处是打包进 exe 的副本，
-# 两者必须一致，tests/test_core_integrity.py 会断言。改版本时两处一起改。
+# Frozen launcher keeps a copy of the pinned core trust constants.
+# tests/test_core_integrity.py asserts exact equality with backend/core_installer.py.
 CORE_VERSION = "v1.19.31"
-CORE_API = f"https://api.github.com/repos/MetaCubeX/mihomo/releases/tags/{CORE_VERSION}"
-CORE_PATTERNS = (r"^mihomo-windows-amd64-v1-v[0-9].*\.zip$", r"^mihomo-windows-amd64.*\.zip$")
-CORE_SUM_HINTS = ("sha256","sha512","checksum","sums","digest")
+CORE_ASSET_NAME = "mihomo-windows-amd64-v1-v1.19.31.zip"
+CORE_ZIP_SHA256 = "d89c9bd746e8aacff89b2edf674813e25e8bd2dc565f4e12dc3b4526dd2b3177"
+CORE_DOWNLOAD_URL = (
+    f"https://github.com/MetaCubeX/mihomo/releases/download/{CORE_VERSION}/{CORE_ASSET_NAME}"
+)
+CORE_ARCHIVE_FILENAME = "mihomo-verified.zip"
 
 OBSOLETE = [
     "START_FLY.bat","LAUNCHER.bat","INSTALL_CORE.bat","start_fly.py",
@@ -340,64 +343,67 @@ def install_python(ui):
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
-def _sha_for(text,filename):
-    lines=[x.strip() for x in str(text).splitlines() if x.strip()]
-    for line in lines:
-        m=re.match(r"^([0-9a-fA-F]{64})[\s*]+(.+)$",line)
-        if m and PurePosixPath(m.group(2).replace("\\","/").strip()).name==filename:
-            return m.group(1).lower()
-    if len(lines)==1:
-        m=re.search(r"\b([0-9a-fA-F]{64})\b",lines[0])
-        if m: return m.group(1).lower()
-    return None
+def _atomic_bytes(target: Path, data: bytes):
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd,tmp=tempfile.mkstemp(dir=str(target.parent),prefix=f".{target.name}.",suffix=".part")
+    try:
+        with os.fdopen(fd,"wb") as f:
+            f.write(data); f.flush(); os.fsync(f.fileno())
+        os.replace(tmp,target)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
 
-def _core_expected_sha(data,asset):
-    digest=str(asset.get("digest") or "")
-    if digest.lower().startswith("sha256:"):
-        v=digest.split(":",1)[1].strip().lower()
-        if re.fullmatch(r"[0-9a-f]{64}",v): return v
-    for other in data.get("assets",[]):
-        n=str(other.get("name",""))
-        if n==asset.get("name") or not any(h in n.lower() for h in CORE_SUM_HINTS):
-            continue
-        try: blob=fetch(other["browser_download_url"])
-        except Exception: continue
-        sha=_sha_for(blob.decode("utf-8",errors="replace"),asset.get("name",""))
-        if sha: return sha
-    return None
+def _trusted_core_payload(blob: bytes):
+    actual=hashlib.sha256(blob).hexdigest()
+    if actual.lower()!=CORE_ZIP_SHA256.lower():
+        raise RuntimeError(
+            f"Mihomo 归档 SHA-256 不匹配（{actual[:12]} != {CORE_ZIP_SHA256[:12]}）。")
+    try:
+        with zipfile.ZipFile(io.BytesIO(blob)) as zf:
+            names=[n for n in zf.namelist()
+                   if PurePosixPath(n.replace("\\","/")).name.lower().startswith("mihomo")
+                   and n.lower().endswith(".exe")]
+            if len(names)!=1:
+                raise RuntimeError("可信 Mihomo 归档里没有唯一 exe。")
+            payload=zf.read(names[0])
+    except zipfile.BadZipFile as exc:
+        raise RuntimeError("Mihomo 归档损坏。") from exc
+    if len(payload)<1024*1024 or payload[:2]!=b"MZ":
+        raise RuntimeError("Mihomo exe 结构异常。")
+    return payload
+
+def _file_sha256(path: Path):
+    h=hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda:f.read(1024*1024),b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 def ensure_core(root: Path, ui):
     core=root/"core"/"mihomo.exe"
-    if core.exists() and core.stat().st_size > 1024*1024:
-        return
-    ui.status(f"正在下载已验证兼容的 Mihomo {CORE_VERSION}...")
+    archive=root/"core"/CORE_ARCHIVE_FILENAME
+
+    if archive.exists():
+        try:
+            blob=archive.read_bytes()
+            payload=_trusted_core_payload(blob)
+            if core.exists() and core.stat().st_size==len(payload) and \
+               _file_sha256(core)==hashlib.sha256(payload).hexdigest():
+                return
+            _atomic_bytes(core,payload)
+            ui.log(f"Mihomo {CORE_VERSION} 已从本地可信归档修复。")
+            return
+        except (OSError,RuntimeError) as e:
+            ui.log(f"本地 Mihomo 可信归档不可用，将重新下载：{e}")
+
+    ui.status(f"正在下载固定 Mihomo {CORE_VERSION}...")
     ui.progress(None)
-    data=json.loads(fetch(CORE_API,ui).decode("utf-8",errors="replace"))
-    asset=None
-    for pat in CORE_PATTERNS:
-        asset=next((a for a in data.get("assets",[]) if re.match(pat,a.get("name",""))),None)
-        if asset: break
-    if not asset: raise RuntimeError("未找到兼容的 Mihomo Windows 安装包。")
-    expected=_core_expected_sha(data,asset)
-    if not expected:
-        raise RuntimeError("官方 Mihomo Release 未提供可验证 SHA-256，已拒绝安装。")
-    blob=fetch(asset["browser_download_url"],ui)
-    actual=hashlib.sha256(blob).hexdigest()
-    if actual!=expected:
-        raise RuntimeError(f"内核完整性校验失败，已拒绝安装（{actual[:12]} != {expected[:12]}）。")
-    with zipfile.ZipFile(io.BytesIO(blob)) as zf:
-        name=next((n for n in zf.namelist() if re.search(r"mihomo.*\.exe$",n)),None)
-        if not name: raise RuntimeError("Mihomo 安装包里没有可执行文件。")
-        payload=zf.read(name)
-    core.parent.mkdir(parents=True,exist_ok=True)
-    fd,tmp=tempfile.mkstemp(dir=str(core.parent),prefix=".mihomo-",suffix=".part")
-    try:
-        with os.fdopen(fd,"wb") as f:
-            f.write(payload); f.flush(); os.fsync(f.fileno())
-        os.replace(tmp,core)
-    except BaseException:
-        Path(tmp).unlink(missing_ok=True); raise
-    ui.log(f"Mihomo {CORE_VERSION} 完整性校验通过并安装完成。")
+    blob=fetch(CORE_DOWNLOAD_URL,ui)
+    payload=_trusted_core_payload(blob)
+    _atomic_bytes(archive,blob)
+    _atomic_bytes(core,payload)
+    ui.log(f"Mihomo {CORE_VERSION} 固定归档与 exe 完整性校验通过。")
 
 def run_flow(root: Path, ui):
     (root/"runtime").mkdir(parents=True, exist_ok=True)
