@@ -135,10 +135,17 @@ def _read_manifest(top: Path):
         data = json.loads(manifest.read_text(encoding="utf-8-sig"))
     except Exception as e:
         raise RuntimeError(f"更新清单损坏：{e}") from e
-    dirs = [x for x in data.get("managed_dirs", []) if x in MANAGED_DIRS]
-    roots = [x for x in data.get("managed_root", []) if x in MANAGED_ROOT]
-    return {"managed_dirs": dirs or list(MANAGED_DIRS),
-            "managed_root": roots or list(MANAGED_ROOT)}
+    requested_dirs = set(data.get("managed_dirs", []))
+    requested_roots = set(data.get("managed_root", []))
+    unknown_dirs = requested_dirs - set(MANAGED_DIRS)
+    unknown_roots = requested_roots - set(MANAGED_ROOT)
+    if unknown_dirs or unknown_roots:
+        raise RuntimeError("更新清单包含未授权路径，已拒绝更新。")
+    # The trusted managed set is fixed by the launcher, not by the incoming
+    # package. If a future release removes a managed root file/directory, the
+    # old copy must disappear instead of surviving forever.
+    return {"managed_dirs": list(MANAGED_DIRS),
+            "managed_root": list(MANAGED_ROOT)}
 
 def _copy_path(src: Path, dst: Path):
     if src.is_dir():
