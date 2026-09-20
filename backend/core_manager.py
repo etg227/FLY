@@ -7,6 +7,8 @@ from .core_installer import (
     CoreInspection, core_archive_path, inspect_core,
 )
 from .mihomo_config import build_runtime_config, redact_runtime_config
+from .core_log_stream import start_stream
+from .elevated_launch import ElevationCancelled, ElevationError, launch_elevated
 
 class CoreError(RuntimeError): pass
 
@@ -99,6 +101,7 @@ class CoreManager:
         self._cleanup_lock = threading.Lock()
         self._verify_lock = threading.Lock()
         self._verify_cache = None
+        self._stream_stop = None
 
     def is_installed(self):
         return self.paths.core_exe.exists() and core_archive_path(self.paths).exists()
@@ -202,6 +205,19 @@ class CoreManager:
         except Exception as e:
             self.log(f"[CORE] 残留进程检查已跳过：{e}")
 
+    def _on_line_safe(self, line):
+        if self.on_line:
+            try: self.on_line(line)
+            except Exception: pass
+
+    def _watch_exit(self, proc):
+        """提权进程没有管道可读——直接等句柄发信号。"""
+        try:
+            proc.wait(timeout=None)
+        except Exception:
+            pass
+        self._notify_exit(proc)
+
     def _read_output(self, proc):
         try:
             if proc.stdout:
@@ -219,6 +235,9 @@ class CoreManager:
             self._notify_exit(proc)
 
     def _notify_exit(self, proc):
+        stop = self._stream_stop
+        if stop is not None:
+            stop.set()
         if self._stopping or proc is not self.process:
             return
         try: code = proc.wait(timeout=2)
@@ -275,7 +294,15 @@ class CoreManager:
         except Exception:
             return False
 
-    def start(self, game_ids):
+    def start(self, game_ids, elevate=False):
+        """启动内核。elevate=True 时只提权 mihomo 本体（FLY 保持普通权限）。
+
+        提权路径与普通路径的差异全部收在这里：
+        - 启动方式：ShellExecuteEx(runas) 代替 Popen；
+        - 日志通道：API /logs 流代替 stdout 管道；
+        - 退出感知：句柄等待线程代替读管道到 EOF。
+        其余（配置生成/校验、端口预检、API 就绪判定、stop 语义）完全一致。
+        """
         self.stop()
         self.log("[CORE] 检查残留进程...")
         self.cleanup_orphans()
@@ -291,21 +318,43 @@ class CoreManager:
             self._preflight_ports(settings)
             self._stopping = False
             self._starting = True
-            self.process = subprocess.Popen(
-                [str(self.paths.core_exe), "-d", str(home), "-f", str(cfg)],
-                cwd=str(self.paths.app),
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True, encoding="utf-8", errors="replace",
-                creationflags=self._flags()
-            )
+            args = ["-d", str(home), "-f", str(cfg)]
+            if elevate:
+                self.log("[CORE] TUN 需要管理员权限：即将弹出 UAC，对象是已验证的 mihomo.exe 本体。")
+                try:
+                    self.process = launch_elevated(self.paths.core_exe, args,
+                                                   cwd=str(self.paths.app))
+                except ElevationCancelled as e:
+                    self._starting = False
+                    raise CoreError("已在 UAC 提示中取消授权；TUN 配置需要管理员权限才能启动内核。") from e
+                except ElevationError as e:
+                    self._starting = False
+                    raise CoreError(
+                        f"提权启动内核失败（{e}）。也可以手动以管理员身份运行 FLY 后重试。") from e
+            else:
+                self.process = subprocess.Popen(
+                    [str(self.paths.core_exe)] + args,
+                    cwd=str(self.paths.app),
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    text=True, encoding="utf-8", errors="replace",
+                    creationflags=self._flags()
+                )
         proc = self.process
         self._assign_job(proc)
-        self.reader_thread = threading.Thread(target=self._read_output, args=(proc,), daemon=True)
-        self.reader_thread.start()
-
         port = int(settings["controller_port"])
         secret = settings["api_secret"]
+        if proc.stdout is not None:
+            self.reader_thread = threading.Thread(target=self._read_output, args=(proc,), daemon=True)
+            self.reader_thread.start()
+        else:
+            # 提权进程没有 stdout：日志走 API /logs 流，退出感知走句柄等待
+            self._stream_stop, _ = start_stream(
+                port, secret,
+                on_line=self._on_line_safe, log=self.log,
+                alive=lambda p=proc: p.poll() is None and not self._stopping)
+            self.reader_thread = threading.Thread(target=self._watch_exit, args=(proc,), daemon=True)
+            self.reader_thread.start()
         deadline = time.time() + 12
         while time.time() < deadline:
             if proc.poll() is not None or self.process is not proc:
@@ -330,6 +379,10 @@ class CoreManager:
     def stop(self):
         self._stopping = True
         self._starting = False
+        stop = self._stream_stop
+        if stop is not None:
+            stop.set()
+            self._stream_stop = None
         proc, self.process = self.process, None
         if not proc:
             return
@@ -338,6 +391,11 @@ class CoreManager:
             try:
                 proc.terminate(); proc.wait(timeout=4)
             except Exception:
-                try: proc.kill()
-                except Exception: pass
+                try:
+                    proc.kill(); proc.wait(timeout=2)
+                except Exception:
+                    self.log("[CORE] 无法结束提权内核进程，请在任务管理器中手动结束 mihomo.exe。")
+        if hasattr(proc, "close"):
+            try: proc.close()
+            except Exception: pass
         self.log("[CORE] Stopped.")

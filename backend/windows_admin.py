@@ -7,6 +7,11 @@ def is_admin():
     except Exception: return False
 
 def relaunch_as_admin(games="", autostart=False):
+    """遗留入口：整程序提权重启。
+
+    v0.8.11 起主流程不再使用——TUN 只提权 mihomo 本体（见
+    elevated_launch.py），FLY 保持普通权限。保留此函数仅作为
+    提权启动完全不可用时的手动兜底（用户自己右键管理员运行等价）。"""
     if os.name != "nt": return False
     try:
         args = []

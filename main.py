@@ -22,7 +22,7 @@ from backend.privacy import redact_log_line
 from backend.subscription import check_subscription, describe_userinfo, fmt_bytes, fmt_speed
 from backend.system_proxy import SystemProxy
 from backend.self_update import schedule_launcher_replace
-from backend.windows_admin import is_admin, relaunch_as_admin
+from backend.windows_admin import is_admin
 
 APP_DIR = Path(__file__).resolve().parent
 PATHS = Paths(APP_DIR)
@@ -171,7 +171,8 @@ class FlyApp:
         ttk.Label(route,justify="left",wraplength=840,text=(
             "域名 / IP / 端口 / 进程规则全部显式声明，未命中业务规则的连接最终 MATCH,DIRECT；局域网/链路本地地址强制 DIRECT。\n"
             "标注“整浏览器”的配置使用 TUN 按浏览器进程匹配，不再把所有使用系统代理的软件一起送去日本线路。\n"
-            "TUN 模式会由本机 Mihomo 接管 DNS，但 DIRECT 连接使用系统 DNS 重新解析；纯域名配置才使用 Windows 系统代理，停止或异常退出会自动还原。"
+            "TUN 模式会由本机 Mihomo 接管 DNS，但 DIRECT 连接使用系统 DNS 重新解析；纯域名配置才使用 Windows 系统代理，停止或异常退出会自动还原。\n"
+            "TUN 需要管理员时，UAC 只授权给哈希校验过的 mihomo 内核本体，FLY 程序自身始终保持普通权限。"
         )).pack(anchor="w")
 
         logf = ttk.LabelFrame(outer,text="Live log",padding=8); logf.pack(fill="both",expand=True)
@@ -456,15 +457,14 @@ class FlyApp:
         ok,_=node_source_is_configured(PATHS)
         if not ok:
             messagebox.showwarning("FLY","请先在设置里配置你自己的节点/订阅。"); return
+        # UAC 信任边界：FLY 本体永远不提权。TUN 配置需要管理员时，
+        # 只对哈希钉死、启动前刚校验过的 mihomo.exe 弹 UAC——
+        # 用户可写目录里被篡改的 .py 拿不到管理员权限。
         tun_names=[self.profile_by_id[p]["name"] for p in effective if _needs_tun(self.profile_by_id[p])]
-        if tun_names and not is_admin():
-            if messagebox.askyesno("FLY",f"{'、'.join(tun_names)} 需要 TUN 模式（管理员权限），是否以管理员身份重启？") \
-               and relaunch_as_admin(",".join(selected), autostart=True):
-                # Only tear down after UAC launch succeeded; the elevated copy
-                # waits on our mutex while we restore proxy/core cleanly.
-                self._teardown()
-                self.root.after(300,self.on_close)
-            return
+        elevate_core = bool(tun_names) and not is_admin()
+        if elevate_core:
+            self.log(f"[FLY] {'、'.join(tun_names)} 需要 TUN：稍后会弹出 UAC，"
+                     "授权对象是已验证的 mihomo.exe（FLY 本体保持普通权限）。")
         # Reapplying settings must fully tear down the previous routing state
         # before the new core starts; otherwise old system proxy can feed a
         # not-yet-selected FLY-JP group.
@@ -474,14 +474,15 @@ class FlyApp:
         self.status_var.set("启动中..."); self.start_btn.configure(state="disabled")
         self._start_token += 1
         self._start_thread = threading.Thread(
-            target=self._start_worker, args=(effective, selected, self._start_token), daemon=True)
+            target=self._start_worker,
+            args=(effective, selected, self._start_token, elevate_core), daemon=True)
         self._start_thread.start()
 
     def _check_cancelled(self, token):
         if self._closing or token != self._start_token or self._start_cancel.is_set():
             raise _Cancelled()
 
-    def _start_worker(self,effective,selected,token):
+    def _start_worker(self,effective,selected,token,elevate_core=False):
         try:
             names="、".join(self.profile_by_id[p]["name"] for p in selected) or "（无）"
             self.log(f"[FLY] 已选配置：{names}")
@@ -490,7 +491,7 @@ class FlyApp:
                 self.log(f"[FLY] 默认加速的常用服务：{svc}")
             self._check_cancelled(token)
             self._ui(lambda:self.status_var.set("启动内核..."))
-            self.core.start(effective)
+            self.core.start(effective, elevate=elevate_core)
             self._check_cancelled(token)
             self._ui(lambda:self.status_var.set("检测日本节点..."))
             self.selector=self.make_selector(selected)
