@@ -165,6 +165,33 @@ def install_python(ui):
 CORE_API="https://api.github.com/repos/MetaCubeX/mihomo/releases/latest"
 CORE_PATTERNS=(r"^mihomo-windows-amd64-v1-v[0-9].*\.zip$",r"^mihomo-windows-amd64.*\.zip$")
 
+CORE_SUM_HINTS=("sha256","sha512","checksum","sums","digest")
+
+def _sha_for(text,filename):
+    lines=[x.strip() for x in str(text).splitlines() if x.strip()]
+    for line in lines:
+        m=re.match(r"^([0-9a-fA-F]{64})[\s*]+(.+)$",line)
+        if m and Path(m.group(2).strip()).name==filename: return m.group(1).lower()
+    if len(lines)==1:
+        m=re.search(r"\b([0-9a-fA-F]{64})\b",lines[0])
+        if m: return m.group(1).lower()
+    return None
+
+def _core_expected_sha(data,asset,ui):
+    """校验基准只从官方 Release 取；拿不到就返回 None。"""
+    digest=str(asset.get("digest") or "")
+    if digest.lower().startswith("sha256:"):
+        v=digest.split(":",1)[1].strip().lower()
+        if re.fullmatch(r"[0-9a-f]{64}",v): return v
+    for other in data.get("assets",[]):
+        n=str(other.get("name",""))
+        if n==asset.get("name") or not any(h in n.lower() for h in CORE_SUM_HINTS): continue
+        try: blob=fetch(other["browser_download_url"])
+        except Exception: continue
+        sha=_sha_for(blob.decode("utf-8",errors="replace"),asset.get("name",""))
+        if sha: return sha
+    return None
+
 def ensure_core(root: Path, ui):
     core=root/"core"/"mihomo.exe"
     if core.exists(): return
@@ -176,12 +203,22 @@ def ensure_core(root: Path, ui):
         asset=next((a for a in data.get("assets",[]) if re.match(pat,a.get("name",""))),None)
         if asset: break
     if not asset: raise RuntimeError("未找到兼容的 Mihomo Windows 安装包。")
+    expected=_core_expected_sha(data,asset,ui)
     blob=fetch(asset["browser_download_url"],ui)
+    actual=hashlib.sha256(blob).hexdigest()
+    if expected and actual!=expected:
+        raise RuntimeError(f"内核完整性校验失败，已拒绝安装（{actual[:12]}... != {expected[:12]}...）。")
+    ui.log("内核完整性校验通过。" if expected else "内核已从官方源下载（上游未提供校验值）。")
     with zipfile.ZipFile(io.BytesIO(blob)) as zf:
         name=next((n for n in zf.namelist() if re.search(r"mihomo.*\.exe$",n)),None)
         if not name: raise RuntimeError("Mihomo 安装包里没有可执行文件。")
         core.parent.mkdir(parents=True,exist_ok=True)
-        core.write_bytes(zf.read(name))
+        fd,tmp=tempfile.mkstemp(dir=str(core.parent),prefix=".mihomo-",suffix=".part")
+        try:
+            with os.fdopen(fd,"wb") as f: f.write(zf.read(name))
+            os.replace(tmp,core)
+        except BaseException:
+            Path(tmp).unlink(missing_ok=True); raise
     ui.log("加速内核安装完成。")
 
 def run_flow(root: Path, ui):
