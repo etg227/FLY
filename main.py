@@ -409,7 +409,10 @@ class FlyApp:
         if tun_names and not is_admin():
             if messagebox.askyesno("FLY",f"{'、'.join(tun_names)} 需要 TUN 模式（管理员权限），是否以管理员身份重启？") \
                and relaunch_as_admin(",".join(selected), autostart=True):
-                self.root.after(300,self.root.destroy)
+                # Only tear down after UAC launch succeeded; the elevated copy
+                # waits on our mutex while we restore proxy/core cleanly.
+                self._teardown()
+                self.root.after(300,self.on_close)
             return
         # Reapplying settings must fully tear down the previous routing state
         # before the new core starts; otherwise old system proxy can feed a
@@ -558,7 +561,7 @@ class FlyApp:
         """把 UI 更新投递回主线程；窗口已销毁时安静丢弃。"""
         try:
             self.root.after(0, fn)
-        except RuntimeError:
+        except (RuntimeError, tk.TclError):
             pass
 
     def _on_core_exit(self, code):
