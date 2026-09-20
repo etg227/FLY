@@ -387,14 +387,38 @@ def save_custom_profiles(paths, profiles):
             cleaned.append(p)
     save_json(paths.custom_profiles, {"profiles": cleaned})
 
-def registrable_domain(host):
-    """Compatibility helper: now deliberately conservative.
+_COMMON_SLD = {"co","com","net","org","gov","edu","ac","go","or","ne"}
+_SHARED_TENANT_SUFFIXES = {
+    "github.io","pages.dev","blogspot.com","appspot.com","workers.dev",
+    "vercel.app","netlify.app","web.app","firebaseapp.com","herokuapp.com",
+    "azurewebsites.net","onrender.com","railway.app","surge.sh",
+    "s3.amazonaws.com","notion.site",
+}
 
-    Shared-hosting suffix guessing caused user.github.io -> github.io and
-    notion.site/s3.amazonaws.com over-routing.  Custom URL profiles therefore
-    route the exact hostname only unless the user explicitly adds more domains.
+def registrable_domain(host):
+    """Choose a useful site suffix without swallowing shared-hosting tenants.
+
+    Normal www.foo.com becomes foo.com so sibling API/image subdomains follow
+    the same custom profile. Known multi-tenant hosting suffixes deliberately
+    stay on the exact hostname (user.github.io never becomes github.io).
     """
-    return _idna_host(host)
+    host = _idna_host(host)
+    if not host:
+        return ""
+    try:
+        ipaddress.ip_address(host)
+        return host
+    except ValueError:
+        pass
+    for suffix in _SHARED_TENANT_SUFFIXES:
+        if host == suffix or host.endswith("." + suffix):
+            return host
+    labels=[x for x in host.split(".") if x]
+    if len(labels)>=3 and labels[-2] in _COMMON_SLD and len(labels[-1])<=3:
+        return ".".join(labels[-3:])
+    if len(labels)>=2:
+        return ".".join(labels[-2:])
+    return host
 
 def profile_from_url(raw_url, name=""):
     raw = str(raw_url).strip()
