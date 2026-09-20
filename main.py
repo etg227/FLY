@@ -71,6 +71,8 @@ class FlyApp:
         self._traffic_stop = None
         self._core_installing = False
         self._core_verifying = False
+        self._core_verify_retry_after = 0.0
+        self._autostart_deadline = time.time() + 30 if autostart else 0.0
         # 启动是个几十秒的后台流程，中途可能被“停止”或关窗打断。
         # 没有取消机制的话，worker 会在窗口销毁之后才去开系统代理，
         # 于是代理永久指向一个死端口——浏览器断网到下次启动 FLY。
@@ -370,6 +372,7 @@ class FlyApp:
             return
 
         if result.state == TRANSIENT:
+            self._core_verify_retry_after = time.time() + 3.0
             self.log(f"[CORE] 完整性校验暂时无法完成：{result.detail}")
             self._ui(lambda: self.core_var.set("暂时无法校验"))
             return
@@ -409,9 +412,14 @@ class FlyApp:
         if self.core.verified_state() is True:
             self.start_accel()
             return
-        if not self._core_installing and not self._core_verifying:
+        if self._autostart_deadline and time.time() >= self._autostart_deadline:
+            self.log("[CORE] 管理员重启后的内核准备超过 30 秒，已取消自动启动；请查看内核状态后手动重试。")
+            self.status_var.set("等待手动启动")
+            return
+        if (not self._core_installing and not self._core_verifying and
+                time.time() >= self._core_verify_retry_after):
             self.refresh_status()
-        self.root.after(400, self._autostart_when_core_ready)
+        self.root.after(500, self._autostart_when_core_ready)
 
     def open_settings(self):
         SettingsWindow(self.root,self.profiles,self.refresh_status)
