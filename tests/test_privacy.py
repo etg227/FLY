@@ -15,13 +15,15 @@ class PrivacyTests(unittest.TestCase):
         self.assertNotIn("35.72.161.13",safe)
         self.assertIn("<host:",safe)
 
-    def test_runtime_config_subscription_is_redacted(self):
+    def test_runtime_config_subscription_and_api_secret_are_redacted(self):
         p=Path(tempfile.mkdtemp())/"config.yaml"
         url="https://airport.example/sub?token=SECRET"
-        p.write_text("url: '"+url+"'\n",encoding="utf-8")
+        p.write_text("secret: 'LOCAL-API-SECRET'\nurl: '"+url+"'\n",encoding="utf-8")
         redact_runtime_config(p,[url])
         text=p.read_text(encoding="utf-8")
         self.assertNotIn("SECRET",text)
+        self.assertNotIn("LOCAL-API-SECRET",text)
         self.assertIn("<redacted-subscription-1>",text)
+        self.assertIn("<redacted-api-secret>",text)
 
 if __name__=="__main__":unittest.main()
