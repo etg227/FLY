@@ -1,7 +1,10 @@
 from __future__ import annotations
 import ctypes, json, os, socket, subprocess, threading, time, urllib.error, urllib.request
 from .config import Paths, load_app_settings
-from .core_installer import CORE_VERSION
+from .core_installer import (
+    VALID, MISSING, REPAIRABLE, INVALID, TRANSIENT,
+    CoreInspection, core_archive_path, inspect_core,
+)
 from .mihomo_config import build_runtime_config, redact_runtime_config
 
 class CoreError(RuntimeError): pass
@@ -93,61 +96,71 @@ class CoreManager:
         self.on_exit = on_exit
         self.on_line = on_line
         self._cleanup_lock = threading.Lock()
+        self._verify_lock = threading.Lock()
         self._verify_cache = None
 
     def is_installed(self):
+        return self.paths.core_exe.exists() and core_archive_path(self.paths).exists()
+
+    @staticmethod
+    def _path_fingerprint(path):
         try:
-            return self.paths.core_exe.exists() and self.paths.core_exe.stat().st_size > 1024 * 1024
+            st = Path(path).stat()
+            return (True, getattr(st, "st_dev", 0), getattr(st, "st_ino", 0),
+                    st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+        except FileNotFoundError:
+            return (False,)
         except OSError:
-            return False
+            return None
+
+    def _verify_fingerprint(self):
+        return (self._path_fingerprint(self.paths.core_exe),
+                self._path_fingerprint(core_archive_path(self.paths)))
+
+    def invalidate_verify_cache(self):
+        with self._verify_lock:
+            self._verify_cache = None
+
+    def verify_binary_status(self, force=False):
+        """Single-flight integrity verification without executing mihomo.exe."""
+        with self._verify_lock:
+            fp = self._verify_fingerprint()
+            if not force and self._verify_cache and self._verify_cache[0] == fp:
+                return self._verify_cache[1]
+
+            result = inspect_core(self.paths)
+            # Transient read/sharing failures must never become sticky. Missing,
+            # repairable and invalid states may be cached until files change.
+            if result.state == TRANSIENT or fp is None or None in fp:
+                self._verify_cache = None
+            else:
+                self._verify_cache = (self._verify_fingerprint(), result)
+            return result
 
     def verify_binary(self, timeout=8):
-        """校验内核可执行文件；结果按文件指纹缓存。
-
-        每次都起一个子进程跑 `mihomo -v` 太重：首次运行遇上杀软扫描很容易
-        超时，被误判成「内核损坏」并触发重新下载。只缓存成功结果——失败可能
-        只是一次瞬时超时，不该被粘住。"""
-        try:
-            st = self.paths.core_exe.stat()
-            key = (st.st_mtime_ns, st.st_size)
-        except OSError:
-            self._verify_cache = None
-            return False
-        cached = self._verify_cache
-        if cached and cached[0] == key:
-            return True
-        if self._verify_binary_uncached(timeout):
-            self._verify_cache = (key, True)
-            return True
-        self._verify_cache = None
-        return False
+        # timeout is kept for call-site compatibility; verification is pure I/O.
+        return self.verify_binary_status().state == VALID
 
     def verified_state(self):
-        """已知的校验结果；没校验过就返回 None，绝不在调用线程上起子进程。"""
-        try:
-            st = self.paths.core_exe.stat()
-        except OSError:
-            return False
-        cached = self._verify_cache
-        return True if cached and cached[0] == (st.st_mtime_ns, st.st_size) else None
+        """Return True/False for a cached verdict, None when verification is needed."""
+        with self._verify_lock:
+            fp = self._verify_fingerprint()
+            cached = self._verify_cache
+            if not cached or cached[0] != fp:
+                return None
+            result = cached[1]
+            if result.state == VALID:
+                return True
+            if result.state in (MISSING, REPAIRABLE, INVALID):
+                return False
+            return None
 
-    def _verify_binary_uncached(self, timeout):
-        if not self.is_installed():
-            return False
-        try:
-            with self.paths.core_exe.open("rb") as f:
-                if f.read(2) != b"MZ":
-                    return False
-            r = subprocess.run([str(self.paths.core_exe), "-v"],
-                               cwd=str(self.paths.app), stdout=subprocess.PIPE,
-                               stderr=subprocess.STDOUT, text=True, encoding="utf-8",
-                               errors="replace", timeout=timeout,
-                               creationflags=self._flags())
-            output = (r.stdout or "").lower()
-            expected = CORE_VERSION.lstrip("v").lower()
-            return r.returncode == 0 and "mihomo" in output and expected in output
-        except Exception:
-            return False
+    def verification_detail(self):
+        with self._verify_lock:
+            fp = self._verify_fingerprint()
+            if self._verify_cache and self._verify_cache[0] == fp:
+                return self._verify_cache[1]
+        return None
 
     def is_running(self): return self.process is not None and self.process.poll() is None
     def _flags(self): return subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
