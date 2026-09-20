@@ -1,48 +1,82 @@
 from pathlib import Path
-from .config import Paths, copy_local_provider, load_app_settings, load_node_source, load_profile_rule
+from .config import (Paths, _clean_rule_values, copy_local_provider, load_app_settings,
+                     load_node_source, load_profile_rules, profile_has_effect)
 from .subscription import provider_cache_name, select_usable_subscriptions
 
 def q(v): return "'" + str(v).replace("'", "''") + "'"
 
 FAKE_IP_FILTER = [
-    "*.lan", "*.local", "+.msftconnecttest.com", "+.msftncsi.com",
+    "*.lan", "*.local", "+.home.arpa", "+.msftconnecttest.com", "+.msftncsi.com",
     "time.windows.com", "+.pool.ntp.org", "+.ntp.org",
     "+.qq.com", "+.steamserver.net",
 ]
-DNS_NAMESERVERS = ["223.5.5.5", "119.29.29.29", "https://doh.pub/dns-query"]
+DNS_NAMESERVERS = ["https://doh.pub/dns-query", "https://dns.alidns.com/dns-query"]
 DNS_BOOTSTRAP = ["223.5.5.5", "119.29.29.29"]
 
-# When a full_browser profile is selected together with a TUN profile, the
-# system proxy stays off and browser traffic rides TUN instead — match it by
-# browser process name so the coverage survives the mixed selection.
-BROWSER_PROCESSES = ["msedge.exe", "chrome.exe", "firefox.exe", "brave.exe"]
+# Full-browser mode is implemented through TUN process matching, not IN-PORT.
+# This makes "full browser" mean browsers rather than every application that
+# happens to honour the Windows system proxy.
+BROWSER_PROCESSES = [
+    "msedge.exe", "chrome.exe", "firefox.exe", "brave.exe",
+    "opera.exe", "opera_gx.exe", "vivaldi.exe", "arc.exe", "chromium.exe",
+    "librewolf.exe", "waterfox.exe", "floorp.exe",
+]
+
+PRIVATE_DIRECT_RULES = [
+    "IP-CIDR,127.0.0.0/8,DIRECT,no-resolve",
+    "IP-CIDR,10.0.0.0/8,DIRECT,no-resolve",
+    "IP-CIDR,172.16.0.0/12,DIRECT,no-resolve",
+    "IP-CIDR,192.168.0.0/16,DIRECT,no-resolve",
+    "IP-CIDR,169.254.0.0/16,DIRECT,no-resolve",
+    "IP-CIDR6,::1/128,DIRECT,no-resolve",
+    "IP-CIDR6,fc00::/7,DIRECT,no-resolve",
+    "IP-CIDR6,fe80::/10,DIRECT,no-resolve",
+    "DOMAIN-SUFFIX,local,DIRECT",
+    "DOMAIN-SUFFIX,home.arpa,DIRECT",
+]
 
 def _dedup(items):
     out, seen = [], set()
     for x in items:
         s = str(x).strip()
-        if s and s.lower() not in seen:
-            seen.add(s.lower()); out.append(s)
+        if s and s.casefold() not in seen:
+            seen.add(s.casefold()); out.append(s)
     return out
+
+def _safe_processes(values, log):
+    ok, bad = _clean_rule_values("processes", values)
+    for value in bad:
+        log(f"[RULE] 进程名 {value!r} 含不安全字符，已忽略。")
+    return ok
 
 def build_runtime_config(paths: Paths, profile_ids, log=None):
     """Build one Mihomo instance for any number of routing profiles.
-    Safety invariant: every unmatched flow ends at MATCH,DIRECT."""
+
+    Safety invariants:
+    - unmatched traffic ends at MATCH,DIRECT;
+    - local/private networks are always DIRECT;
+    - full-browser profiles use TUN process matching rather than IN-PORT.
+    """
     log = log or (lambda m: None)
     if isinstance(profile_ids, str):
         profile_ids = [profile_ids]
-    profiles = [load_profile_rule(paths, p) for p in profile_ids]
+    profiles = load_profile_rules(paths, profile_ids)
+    if not profiles:
+        raise RuntimeError("没有可用的分流配置。")
     for pid, profile in zip(profile_ids, profiles):
         for bad in profile.get("invalid_values", []):
             log(f"[RULE] 配置 {pid} 中的 {bad} 不符合分流规则语法，已忽略。")
+        if not profile_has_effect(profile):
+            raise RuntimeError(f"配置「{profile.get('name', pid)}」没有任何有效分流规则，已拒绝启动。")
+
     settings = load_app_settings(paths)
     source = load_node_source(paths)
     home = paths.runtime / "mihomo"
     home.mkdir(parents=True, exist_ok=True)
 
-    mixed = int(settings.get("mixed_port",17890))
-    ctrl = int(settings.get("controller_port",19090))
-    secret = str(settings.get("api_secret","")).strip()
+    mixed = int(settings["mixed_port"])
+    ctrl = int(settings["controller_port"])
+    secret = str(settings["api_secret"]).strip()
 
     configured_processes = []
     for pid, profile in zip(profile_ids, profiles):
@@ -50,28 +84,31 @@ def build_runtime_config(paths: Paths, profile_ids, log=None):
         if exe:
             configured_processes.append(Path(exe).name)
         configured_processes.extend(profile.get("processes", []))
-    processes = _dedup(configured_processes)
+    processes = _dedup(_safe_processes(configured_processes, log))
     domains = _dedup(str(d).lower().lstrip("*.") for p in profiles for d in p.get("domains", []))
     keywords = _dedup(str(k).lower() for p in profiles for k in p.get("keywords", []))
     cidrs = _dedup(c for p in profiles for c in p.get("ip_cidrs", []))
     ports = _dedup(p for profile in profiles for p in profile.get("ports", []))
     full_browser = any(bool(p.get("full_browser")) for p in profiles)
 
-    tun_mode = bool(processes) or any(str(p.get("launch_mode","browser")).lower()=="tun" for p in profiles)
+    # full_browser must be process-aware; system-proxy IN-PORT cannot identify
+    # which application sent the request and previously proxied unrelated apps.
+    tun_mode = full_browser or bool(processes) or any(
+        str(p.get("launch_mode","browser")).lower()=="tun" for p in profiles)
 
     lines = [
         f"mixed-port: {mixed}",
         "allow-lan: false",
         "bind-address: 127.0.0.1",
         "mode: rule",
-        "log-level: info",
-        "ipv6: false",
+        "log-level: warning",
+        "ipv6: true",
         "unified-delay: true",
         "tcp-concurrent: true",
         "keep-alive-interval: 30",
         f"external-controller: 127.0.0.1:{ctrl}",
         f"secret: {q(secret)}",
-        "find-process-mode: strict",
+        "find-process-mode: always",
         "",
         "profile:",
         "  store-selected: false",
@@ -79,9 +116,11 @@ def build_runtime_config(paths: Paths, profile_ids, log=None):
         "",
         "dns:",
         "  enable: true",
-        "  ipv6: false",
+        "  ipv6: true",
+        "  use-system-hosts: true",
         "  enhanced-mode: fake-ip",
         "  fake-ip-range: 198.18.0.1/16",
+        "  fake-ip-range6: fdfe:dcba:9876::1/64",
         "  fake-ip-filter:",
     ]
     lines += [f"    - {q(x)}" for x in FAKE_IP_FILTER]
@@ -89,6 +128,7 @@ def build_runtime_config(paths: Paths, profile_ids, log=None):
     lines += [f"    - {x}" for x in DNS_BOOTSTRAP]
     lines += ["  nameserver:"]
     lines += [f"    - {x}" for x in DNS_NAMESERVERS]
+    lines += ["  direct-nameserver:", "    - system", "  direct-nameserver-follow-policy: false"]
     lines += ["  proxy-server-nameserver:"]
     lines += [f"    - {x}" for x in DNS_BOOTSTRAP]
     lines += [""]
@@ -103,6 +143,7 @@ def build_runtime_config(paths: Paths, profile_ids, log=None):
             "  strict-route: false",
             "  dns-hijack:",
             "    - any:53",
+            "    - tcp://any:53",
             "",
             "sniffer:",
             "  enable: true",
@@ -116,7 +157,7 @@ def build_runtime_config(paths: Paths, profile_ids, log=None):
     else:
         lines += ["tun:", "  enable: false", ""]
 
-    HEALTH_CHECK = [
+    health_check = [
         "    health-check:",
         "      enable: true",
         "      url: https://www.gstatic.com/generate_204",
@@ -127,28 +168,31 @@ def build_runtime_config(paths: Paths, profile_ids, log=None):
     mode = str(source.get("mode","file")).strip().lower()
     lines += ["proxy-providers:"]
     provider_names = []
+    sensitive_urls = []
     if mode == "subscription":
         provider_dir = home / "provider"
         provider_dir.mkdir(parents=True, exist_ok=True)
-        # Multiple subscriptions merge into one pool: if one provider's nodes
-        # die, selection simply moves to another provider's Japan nodes.
         usable = select_usable_subscriptions(source.get("subscription_urls", []), provider_dir, log)
         if not usable:
             raise RuntimeError("所有订阅都无法访问且没有本地缓存，请检查网络或订阅链接。")
         for i, u in enumerate(usable, 1):
             name = f"USER{i}"
+            prefix = f"[S{i}] "
             provider_names.append(name)
+            sensitive_urls.append(u)
             lines += [
                 f"  {name}:",
                 "    type: http",
                 f"    url: {q(u)}",
                 f"    path: ./provider/{provider_cache_name(u)}",
                 "    interval: 3600",
-            ] + HEALTH_CHECK
+                "    override:",
+                f"      additional-prefix: {q(prefix)}",
+            ] + health_check
     else:
         copy_local_provider(paths, home)
         provider_names = ["USER"]
-        lines += ["  USER:", "    type: file", "    path: ./provider/nodes.yaml"] + HEALTH_CHECK
+        lines += ["  USER:", "    type: file", "    path: ./provider/nodes.yaml"] + health_check
 
     lines += [
         "",
@@ -158,11 +202,11 @@ def build_runtime_config(paths: Paths, profile_ids, log=None):
         "    use:",
     ]
     lines += [f"      - {n}" for n in provider_names]
-    lines += [
-        "",
-        "rules:",
-    ]
+    lines += ["", "rules:"]
     rules_start = len(lines)
+
+    for rule in PRIVATE_DIRECT_RULES:
+        lines.append(f"  - {rule}")
 
     if tun_mode:
         for d in domains:
@@ -180,24 +224,18 @@ def build_runtime_config(paths: Paths, profile_ids, log=None):
     for k in keywords:
         lines.append(f"  - DOMAIN-KEYWORD,{k},FLY-JP")
     for c in cidrs:
-        lines.append(f"  - IP-CIDR,{c},FLY-JP,no-resolve")
+        family = "IP-CIDR6" if ":" in c else "IP-CIDR"
+        lines.append(f"  - {family},{c},FLY-JP,no-resolve")
     for port in ports:
         lines.append(f"  - DST-PORT,{port},FLY-JP")
 
-    # Explicit opt-in only (a checked profile with full_browser: true): route
-    # everything the browser sends through FLY-JP. Covers portals like
-    # DMM/FANZA whose in-portal games load from unenumerable vendor domains.
     if full_browser:
-        lines.append(f"  - IN-PORT,{mixed},FLY-JP")
-        if tun_mode:
-            for b in BROWSER_PROCESSES:
-                lines.append(f"  - PROCESS-NAME,{b},FLY-JP")
+        for b in BROWSER_PROCESSES:
+            lines.append(f"  - PROCESS-NAME,{b},FLY-JP")
 
     lines.append("  - MATCH,DIRECT")
     lines.append("")
 
-    # 安全不变量：整份规则里 MATCH 只能有一条，且必须是末尾的 MATCH,DIRECT。
-    # 任何注入若绕过了字段白名单，也会在这里被拦下，而不是静默变成全局代理。
     rule_lines = [x.strip() for x in lines[rules_start:] if x.strip()]
     matches = [x for x in rule_lines if x.upper().startswith("- MATCH,")]
     if len(matches) != 1 or rule_lines[-1] != "- MATCH,DIRECT":
@@ -208,4 +246,19 @@ def build_runtime_config(paths: Paths, profile_ids, log=None):
 
     cfg = home / "config.yaml"
     cfg.write_text("\n".join(lines), encoding="utf-8")
-    return home, cfg
+    return home, cfg, sensitive_urls
+
+def redact_runtime_config(cfg: Path, sensitive_urls):
+    """Remove subscription credentials from the diagnostic copy on disk.
+
+    Mihomo has already parsed the live configuration before this is called, so
+    provider refresh continues from its in-memory configuration while runtime/
+    no longer contains subscription tokens.
+    """
+    try:
+        text = Path(cfg).read_text(encoding="utf-8")
+        for idx, url in enumerate(sensitive_urls or (), 1):
+            text = text.replace(str(url), f"<redacted-subscription-{idx}>")
+        Path(cfg).write_text(text, encoding="utf-8")
+    except OSError:
+        pass
