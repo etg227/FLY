@@ -548,5 +548,8 @@ def copy_local_provider(paths, runtime_home):
     pdir = runtime_home / "provider"
     pdir.mkdir(parents=True, exist_ok=True)
     target = pdir / "nodes.yaml"
-    shutil.copy2(paths.nodes_yaml, target)
+    # node_source_is_configured accepts Notepad-style UTF-8 BOM / UTF-16.
+    # Mihomo should always receive normalized UTF-8 YAML in runtime.
+    text = _decode_nodes_file(paths.nodes_yaml)
+    target.write_text(text.lstrip("\ufeff"), encoding="utf-8", newline="\n")
     return target
