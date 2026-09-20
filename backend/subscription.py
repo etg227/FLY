@@ -130,7 +130,9 @@ def check_subscription(url: str, timeout=8, use_cache=True, retries=1):
                 done.set()
 
 def provider_cache_name(url: str) -> str:
-    return "sub_" + hashlib.sha256(str(url).encode("utf-8")).hexdigest()[:16] + ".yaml"
+    # Keep the historical filename so an offline upgrade can still use its
+    # existing provider cache. Duplicate URLs are deduplicated before config generation.
+    return "sub_" + hashlib.md5(str(url).encode("utf-8")).hexdigest()[:10] + ".yaml"
 
 def select_usable_subscriptions(urls, provider_dir, log=lambda m: None, timeout=8):
     clean, seen = [], set()
