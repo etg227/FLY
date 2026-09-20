@@ -63,9 +63,7 @@ def _looks_like_subscription(blob: bytes, header: str, content_type=""):
                 return True
         except Exception:
             pass
-    ctype = str(content_type or "").lower()
-    # YAML/Clash providers sometimes omit obvious keys in the first chunk.
-    return ("yaml" in ctype or "octet-stream" in ctype) and len(blob) > 32
+    return False
 
 def fetch_userinfo(url: str, timeout=15):
     req = urllib.request.Request(url, headers={"User-Agent": "clash.meta; mihomo (FLY)"})
