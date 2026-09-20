@@ -10,7 +10,7 @@ from backend.config import (
     node_source_is_configured, save_json, app_version, validate_profile
 )
 from backend.core_installer import install_core as download_core
-from backend.core_manager import CoreManager
+from backend.core_manager import CoreManager, DialFailureTracker
 from backend.launcher import log_hints
 from backend.mihomo_api import MihomoApi, JapanNodeSelector
 from backend.subscription import check_subscription, describe_userinfo, fmt_bytes, fmt_speed
@@ -48,7 +48,8 @@ class FlyApp:
             self._log_file.flush()
         except OSError:
             pass
-        self.core = CoreManager(PATHS, self.log, on_exit=self._on_core_exit)
+        self.core = CoreManager(PATHS, self.log, on_exit=self._on_core_exit,
+                                on_line=self._on_core_line)
         self.sysproxy = SystemProxy(PATHS.runtime / "sysproxy_backup.json", self.log)
         self.selector = None
         self.sysproxy_active = False
@@ -62,6 +63,11 @@ class FlyApp:
         self._start_thread = None
         self._closing = False
         self._proxy_lock = threading.Lock()
+        # 节点被墙时内核每隔几秒就报一次出站失败，而看门狗要 60 秒 x 3 轮
+        # 才会换节点——中间这三分钟界面显示“加速中”，其实什么都打不开。
+        # 用内核自己的失败日志把看门狗立刻叫醒。
+        self._probe_now = threading.Event()
+        self._dial_tracker = DialFailureTracker("FLY-JP")
         self._sub_fetching = False
         self._sub_last = 0.0
 
@@ -413,14 +419,25 @@ class FlyApp:
                 s["last_node"]=name; save_json(PATHS.app_settings,s)
         except Exception: pass
 
+    def _on_core_line(self, line):
+        """内核日志钩子（跑在读日志线程上，只做最轻量的判断）。"""
+        if self._dial_tracker.feed(line):
+            self.log("[WATCH] 内核连续报告出站失败，当前节点可能已不可用，立即重新检测...")
+            self._probe_now.set()
+
     def _start_watchdog(self):
         if self._watch_stop: self._watch_stop.set()
         self._watch_stop=threading.Event()
+        self._probe_now.clear(); self._dial_tracker.reset()
         threading.Thread(target=self._watchdog_loop,args=(self._watch_stop,),daemon=True).start()
 
     def _watchdog_loop(self,stop):
         fails=0
-        while not stop.wait(60):
+        while not stop.is_set():
+            # 正常 60 秒一轮；内核报出站失败时会被立刻叫醒
+            woken=self._probe_now.wait(60)
+            if stop.is_set(): return
+            self._probe_now.clear()
             sel=self.selector
             if not sel or not self.core.is_running(): continue
             try:
@@ -428,7 +445,8 @@ class FlyApp:
                 if not current: continue
                 sel.measure_light(current); fails=0
             except Exception:
-                fails+=1
+                # 内核已经证明连不上了，不必再等满三轮
+                fails=3 if woken else fails+1
                 self.log(f"[WATCH] 节点检测失败（{fails}/3）。")
                 if fails>=3:
                     fails=0

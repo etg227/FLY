@@ -5,6 +5,36 @@ from .mihomo_config import build_runtime_config
 
 class CoreError(RuntimeError): pass
 
+class DialFailureTracker:
+    """统计内核报出的出站失败。
+
+    节点被墙时内核每隔几秒就报一次 dial 失败，而看门狗要 60 秒 x 3 轮才会
+    换节点——中间那三分钟界面显示“加速中”，实际什么都打不开。窗口内失败
+    次数够多就返回 True，让上层立刻去重选节点。"""
+
+    def __init__(self, group="FLY-JP", window=20.0, trigger=5, cooldown=60.0, clock=time.time):
+        self.group, self.window, self.trigger, self.cooldown = group, window, trigger, cooldown
+        self._clock = clock
+        self._fails = []
+        self._last_trigger = 0.0
+
+    def feed(self, line):
+        """喂一行内核日志；返回 True 表示应当立刻重新选择节点。"""
+        if f"dial {self.group}" not in line or "error:" not in line:
+            return False
+        now = self._clock()
+        self._fails = [t for t in self._fails if now - t < self.window]
+        self._fails.append(now)
+        if len(self._fails) < self.trigger or now - self._last_trigger <= self.cooldown:
+            return False
+        self._last_trigger = now
+        self._fails.clear()
+        return True
+
+    def reset(self):
+        self._fails.clear()
+        self._last_trigger = 0.0
+
 def _create_kill_on_close_job():
     """A Windows Job Object with KILL_ON_JOB_CLOSE: when our process dies for
     ANY reason (crash, task-manager kill), the OS closes the handle and takes
@@ -47,7 +77,7 @@ def _create_kill_on_close_job():
         return None
 
 class CoreManager:
-    def __init__(self, paths: Paths, log, on_exit=None):
+    def __init__(self, paths: Paths, log, on_exit=None, on_line=None):
         self.paths, self.log = paths, log
         self.process = None
         self.reader_thread = None
@@ -57,6 +87,9 @@ class CoreManager:
         # 而界面仍显示“加速中”。on_exit 让上层能立刻收拾现场。
         self._stopping = False
         self.on_exit = on_exit
+        # 内核每条日志也给上层一份：出站失败是「节点挂了」最快的信号，
+        # 比等看门狗自己去探测快得多。
+        self.on_line = on_line
         # 残留清理是按内核路径匹配的，跟我们自己刚启动的那个一模一样。
         # 用同一把锁把「扫描并杀」和「启动内核」串起来，否则后台清理
         # 可能正好杀掉自己刚 Popen 出来的进程（提权 autostart 最容易撞）。
@@ -109,7 +142,14 @@ class CoreManager:
             if proc.stdout:
                 for line in proc.stdout:
                     line = line.rstrip()
-                    if line: self.log("[CORE] " + line)
+                    if not line:
+                        continue
+                    self.log("[CORE] " + line)
+                    if self.on_line:
+                        try:
+                            self.on_line(line)
+                        except Exception:
+                            pass          # 日志钩子永远不能拖垮读日志的线程
         except Exception as e:
             self.log(f"[CORE] log reader stopped: {e}")
         finally:
