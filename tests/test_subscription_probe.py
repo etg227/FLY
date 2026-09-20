@@ -70,4 +70,27 @@ class SelectUsableTests(unittest.TestCase):
         self.assertTrue(any("403" in x for x in logs))
         self.assertFalse(any("token=x" in x for x in logs))
 
+    def test_corrupt_or_empty_cache_is_not_accepted(self):
+        import tempfile
+        from pathlib import Path
+        provider=Path(tempfile.mkdtemp())
+        cache=provider/sub.provider_cache_name(URL)
+        for payload in (b"", b"<html>login</html>", b"not a subscription"):
+            cache.write_bytes(payload)
+            with mock.patch.object(sub,"_probe",side_effect=_http_error(503)),\
+                 mock.patch.object(sub.time,"sleep",lambda *_:None):
+                usable=sub.select_usable_subscriptions([URL],provider,lambda m:None)
+            self.assertEqual(usable,[])
+
+    def test_valid_yaml_cache_allows_offline_start(self):
+        import tempfile
+        from pathlib import Path
+        provider=Path(tempfile.mkdtemp())
+        cache=provider/sub.provider_cache_name(URL)
+        cache.write_text("proxies:\n  - name: JP\n    type: ss\n",encoding="utf-8")
+        with mock.patch.object(sub,"_probe",side_effect=_http_error(503)),\
+             mock.patch.object(sub.time,"sleep",lambda *_:None):
+            usable=sub.select_usable_subscriptions([URL],provider,lambda m:None)
+        self.assertEqual(usable,[URL])
+
 if __name__=="__main__":unittest.main()
