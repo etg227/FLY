@@ -81,6 +81,7 @@ class FlyApp:
         self._start_cancel = threading.Event()
         self._closing = False
         self._proxy_lock = threading.Lock()
+        self._selection_lock = threading.Lock()
         # 节点被墙时内核每隔几秒就报一次出站失败，而看门狗要 60 秒 x 3 轮
         # 才会换节点——中间这三分钟界面显示“加速中”，其实什么都打不开。
         # 用内核自己的失败日志把看门狗立刻叫醒。
@@ -533,6 +534,9 @@ class FlyApp:
     def switch_node(self):
         if not self.core.is_running():
             messagebox.showinfo("FLY","请先启动加速。"); return
+        if not self._selection_lock.acquire(blocking=False):
+            messagebox.showinfo("FLY","正在进行节点检测/切换，请稍后再试。"); return
+        self.switch_btn.configure(state="disabled")
         def work():
             try:
                 sel=self.selector or self.make_selector()
@@ -542,6 +546,9 @@ class FlyApp:
                 self._ui(lambda:self.delay_var.set(f"{d} ms" if d is not None else "unknown"))
             except Exception as e:
                 self._ui(lambda e=e:messagebox.showerror("FLY",str(e)))
+            finally:
+                self._selection_lock.release()
+                self._ui(lambda:self.switch_btn.configure(state="normal"))
         threading.Thread(target=work,daemon=True).start()
 
     def _remember_node(self,name):
@@ -578,7 +585,8 @@ class FlyApp:
                     # Real outbound dial failures outrank a provider healthcheck
                     # that may be stale/false-positive. Exclude the bad node now.
                     self.log("[WATCH] 真实出站连续失败，直接排除当前节点并切换...")
-                    chosen,delay=sel.auto_select("FLY-JP",wait_s=10,exclude={current})
+                    with self._selection_lock:
+                        chosen,delay=sel.auto_select("FLY-JP",wait_s=10,exclude={current})
                     fails=0
                 else:
                     sel.measure_light(current)
@@ -600,7 +608,8 @@ class FlyApp:
                 if fails>=3:
                     fails=0
                     try:
-                        chosen,delay=sel.auto_select("FLY-JP",wait_s=10,exclude={current})
+                        with self._selection_lock:
+                            chosen,delay=sel.auto_select("FLY-JP",wait_s=10,exclude={current})
                         self._remember_node(chosen)
                         self._ui(lambda n=chosen:self.node_var.set(n))
                         self._ui(lambda d=delay:self.delay_var.set(f"{d} ms" if d is not None else "unknown"))
@@ -661,6 +670,8 @@ class FlyApp:
     def on_close(self):
         self._closing = True
         self._start_token += 1
+        self._start_cancel.set()
+        self._probe_now.set()
         t = self._start_thread
         if t and t.is_alive():
             self.log("[FLY] 等待启动流程退出...")
@@ -700,7 +711,7 @@ class SettingsWindow(tk.Toplevel):
         ttk.Button(box,text="打开 nodes.yaml",command=lambda:os.startfile(str(PATHS.nodes_yaml))).pack(anchor="w",pady=(10,0))
 
         auto=ttk.LabelFrame(f,text="日本节点自动选择",padding=10); auto.pack(fill="x",pady=(12,0))
-        ttk.Label(auto,text="只筛选名称含 Japan / JPN / JP / 日本 / Tokyo / Osaka / 🇯🇵 的节点；选线测速目标来自所选配置的 latency_test_urls，日常保活检测使用轻量端点。",wraplength=650).pack(anchor="w")
+        ttk.Label(auto,text="只筛选名称含 Japan / JPN / JP / 日本 / Tokyo / Osaka / 🇯🇵 的节点；选线与保活都会验证所选配置的服务目标，避免“Google 能通但游戏站点被挡”的假健康。",wraplength=650).pack(anchor="w")
         rr=ttk.Frame(auto); rr.pack(fill="x",pady=(10,0))
         ttk.Label(rr,text="超时 (ms)").pack(side="left"); ttk.Entry(rr,textvariable=self.timeout,width=10).pack(side="left",padx=(8,18))
         ttk.Label(rr,text="延迟不超过").pack(side="left"); ttk.Entry(rr,textvariable=self.sticky,width=10).pack(side="left",padx=(8,4)); ttk.Label(rr,text="ms 时沿用上次节点").pack(side="left")
