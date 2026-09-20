@@ -1,6 +1,5 @@
 from __future__ import annotations
-import json, re, threading, time, urllib.parse, urllib.request, urllib.error
-from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeout
+import json, queue, re, threading, time, urllib.parse, urllib.request, urllib.error
 
 class MihomoApiError(RuntimeError):
     def __init__(self, message, status=None):
@@ -266,27 +265,42 @@ class JapanNodeSelector:
 
         self.log(f"[JP] Found {len(nodes)} Japan candidate(s); testing {len(self.test_urls)} required target(s).")
         results = []
-        pool = ThreadPoolExecutor(max_workers=min(6, len(nodes)))
-        futures = {pool.submit(self._measure, n): n for n in nodes}
+        jobs = queue.Queue()
+        output = queue.Queue()
+        for n in nodes:
+            jobs.put(n)
+
+        def worker():
+            while not self._cancelled():
+                try:
+                    n = jobs.get_nowait()
+                except queue.Empty:
+                    return
+                output.put(self._measure(n))
+
+        # Daemon workers are deliberate: urllib/socket calls cannot be forcibly
+        # cancelled. Stop/close must not be held hostage by a stuck probe.
+        workers = [threading.Thread(target=worker, daemon=True)
+                   for _ in range(min(6, len(nodes)))]
+        for t in workers:
+            t.start()
+
         completed = 0
-        try:
+        deadline = time.time() + self.total_timeout_s
+        while completed < len(nodes) and time.time() < deadline:
+            self._check_cancelled()
             try:
-                for f in as_completed(futures, timeout=self.total_timeout_s):
-                    self._check_cancelled()
-                    n, d, err = f.result()
-                    completed += 1
-                    if d is not None:
-                        self.log(f"[JP TEST {completed}/{len(nodes)}] {n}: {d} ms")
-                    else:
-                        self.log(f"[JP TEST {completed}/{len(nodes)}] {n}: unavailable ({err})")
-                    results.append((n, d))
-            except FuturesTimeout:
-                self.log(f"[JP] 测速总时限 {self.total_timeout_s}s 已到，取消剩余候选。")
-        finally:
-            for f in futures:
-                if not f.done():
-                    f.cancel()
-            pool.shutdown(wait=False, cancel_futures=True)
+                n, d, err = output.get(timeout=min(0.25, max(0.01, deadline-time.time())))
+            except queue.Empty:
+                continue
+            completed += 1
+            if d is not None:
+                self.log(f"[JP TEST {completed}/{len(nodes)}] {n}: {d} ms")
+            else:
+                self.log(f"[JP TEST {completed}/{len(nodes)}] {n}: unavailable ({err})")
+            results.append((n, d))
+        if completed < len(nodes):
+            self.log(f"[JP] 测速总时限 {self.total_timeout_s}s 已到；剩余探测线程将作为 daemon 自行结束。")
 
         self._check_cancelled()
         healthy = sorted([(n,d) for n,d in results if d is not None], key=lambda x:x[1])
