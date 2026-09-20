@@ -13,12 +13,15 @@ _IS_WINDOWS = os.name == "nt"
 _REPLACER = (
     "import os,sys,time\n"
     "src,dst=sys.argv[1],sys.argv[2]\n"
+    "ok=False\n"
     "for _ in range(30):\n"
     "    try:\n"
     "        os.replace(src,dst)\n"
+    "        ok=True\n"
     "        break\n"
     "    except OSError:\n"
-    "        time.sleep(1)\n"          # 旧启动器还占着 launcher.exe，等它退出
+    "        time.sleep(1)\n"
+    "sys.exit(0 if ok else 3)\n"
 )
 
 def schedule_launcher_replace(root: Path, log=lambda m: None, spawn=None):
