@@ -233,9 +233,9 @@ class FlyApp:
         def work():
             parts=[]
             for i,url in enumerate(urls,1):
-                ok,info=check_subscription(url)
+                ok,info,reason=check_subscription(url)
                 tag=f"#{i} " if len(urls)>1 else ""
-                parts.append(tag+(describe_userinfo(info) if ok else "订阅不可用"))
+                parts.append(tag+(describe_userinfo(info) if ok else f"订阅不可用（{reason}）"))
             self._sub_fetching=False
             self._sub_last=time.time()
             text=" ｜ ".join(parts)
