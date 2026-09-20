@@ -104,6 +104,7 @@ class CleanupRaceTests(unittest.TestCase):
         paths = Paths(Path(tempfile.mkdtemp()))
         paths.core_exe.parent.mkdir(parents=True, exist_ok=True)
         paths.core_exe.write_bytes(b"MZ" + b"x" * (1024 * 1024 + 8))
+        (paths.core_exe.parent / "mihomo-verified.zip").write_bytes(b"archive")
         logs = []
         cm = CoreManager(paths, logs.append)
         called = []
