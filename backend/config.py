@@ -472,7 +472,7 @@ def node_source_is_configured(paths):
     except OSError as e:
         return False, f"nodes.yaml 无法读取：{e}"
     has_proxies = bool(re.search(r'(?mi)^\s*(?:["\']?proxies["\']?)\s*:', text))
-    has_name = bool(re.search(r'(?mi)(?:^|[{,]\s*)-?\s*["\']?name["\']?\s*:', text))
+    has_name = bool(re.search(r'(?mi)(?:^\s*-\s*["\']?name["\']?\s*:|[{,]\s*["\']?name["\']?\s*:)', text))
     ok = has_proxies and has_name
     return (True, "本地 nodes.yaml") if ok else (False, "请把节点粘贴到 private\\nodes.yaml")
 
