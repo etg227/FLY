@@ -1,4 +1,4 @@
-import ctypes, os, sys
+import ctypes, os, subprocess, sys
 from pathlib import Path
 
 def is_admin():
@@ -9,15 +9,19 @@ def is_admin():
 def relaunch_as_admin(games="", autostart=False):
     if os.name != "nt": return False
     try:
-        extra = (f' --games "{games}"' if games else "") + (" --autostart" if autostart else "")
-        if getattr(sys, "frozen", False):
-            exe = sys.executable
-            params = extra.strip()
-        else:
-            exe = sys.executable
-            script = Path(sys.argv[0]).resolve()
-            params = f'"{script}"' + extra
-        r = ctypes.windll.shell32.ShellExecuteW(None,"runas",exe,params,str(Path.cwd()),1)
+        args = []
+        if not getattr(sys, "frozen", False):
+            args.append(str(Path(sys.argv[0]).resolve()))
+        if games:
+            args += ["--games", str(games)]
+        if autostart:
+            args.append("--autostart")
+        exe = sys.executable
+        # list2cmdline implements Windows CommandLineToArgvW-compatible quoting;
+        # custom profile IDs can no longer break the elevated command line.
+        params = subprocess.list2cmdline(args)
+        r = ctypes.windll.shell32.ShellExecuteW(
+            None, "runas", exe, params, str(Path.cwd()), 1)
         return r > 32
     except Exception:
         return False
