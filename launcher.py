@@ -5,7 +5,7 @@ core/ and runtime/ are user/runtime state and are never replaced by an app
 update.
 """
 from __future__ import annotations
-import hashlib, io, json, os, queue, re, shutil, subprocess, sys, tempfile, threading, urllib.request, webbrowser, zipfile
+import ctypes, hashlib, io, json, os, queue, re, shutil, subprocess, sys, tempfile, threading, urllib.request, webbrowser, zipfile
 from pathlib import Path, PurePosixPath
 import tkinter as tk
 from tkinter import ttk
@@ -37,6 +37,28 @@ OBSOLETE = [
     "FLY.exe","launcher.spec","FLY.spec","scripts/INSTALL_CORE.ps1",
     "optional/wnacg.json","optional/gdmusic.json","optional/annas.json",
 ]
+
+class _LauncherMutex:
+    def __init__(self, name=r"Local\\FLY-etg227-launcher"):
+        self.name=name; self.handle=None; self.owned=False
+    def acquire(self):
+        if os.name!="nt":
+            self.owned=True; return True
+        k=ctypes.windll.kernel32
+        k.CreateMutexW.restype=ctypes.c_void_p
+        h=k.CreateMutexW(None,True,self.name)
+        if not h:return False
+        if k.GetLastError()==183:
+            k.CloseHandle(h); return False
+        self.handle=h; self.owned=True; return True
+    def close(self):
+        if self.handle and os.name=="nt":
+            try:
+                if self.owned:ctypes.windll.kernel32.ReleaseMutex(self.handle)
+            except Exception:pass
+            try:ctypes.windll.kernel32.CloseHandle(self.handle)
+            except Exception:pass
+        self.handle=None; self.owned=False
 
 def app_dir() -> Path:
     if getattr(sys, "frozen", False):
@@ -469,4 +491,17 @@ class LauncherApp(tk.Tk):
         self.logbox.configure(state="disabled")
 
 if __name__=="__main__":
-    LauncherApp().mainloop()
+    guard=_LauncherMutex()
+    if not guard.acquire():
+        try:
+            r=tk.Tk(); r.withdraw()
+            from tkinter import messagebox
+            messagebox.showinfo("FLY","FLY 启动器已经在运行，请使用现有窗口。")
+            r.destroy()
+        except Exception:
+            pass
+    else:
+        try:
+            LauncherApp().mainloop()
+        finally:
+            guard.close()
