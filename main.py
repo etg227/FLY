@@ -10,7 +10,10 @@ from backend.config import (
     node_source_is_configured, save_json, app_version, validate_profile,
     drain_config_warnings, profile_has_effect, update_app_settings
 )
-from backend.core_installer import install_core as download_core
+from backend.core_installer import (
+    VALID, MISSING, REPAIRABLE, INVALID, TRANSIENT,
+    install_core as download_core,
+)
 from backend.core_manager import CoreManager, DialFailureTracker
 from backend.launcher import log_hints
 from backend.instance_lock import SingleInstance
@@ -115,7 +118,7 @@ class FlyApp:
         threading.Thread(target=self.core.cleanup_orphans,daemon=True).start()
         if autostart:
             self.log("[FLY] Autostart requested (admin relaunch).")
-            self.root.after(600, self.start_accel)
+            self.root.after(300, self._autostart_when_core_ready)
 
     def build(self):
         outer = ttk.Frame(self.root, padding=16); outer.pack(fill="both", expand=True)
@@ -260,25 +263,22 @@ class FlyApp:
             self.root.after(100,self.flush_logs)
 
     def refresh_status(self):
-        # 校验内核要起子进程，绝不能卡在 UI 线程上——没有缓存结果就后台校验
-        core_ok = self.core.verified_state() if PATHS.core_exe.exists() else False
-        if core_ok is None:
+        cached = self.core.verification_detail()
+        if self._core_installing:
+            self.core_var.set("自动下载/修复中...")
+        elif cached and cached.state == VALID:
+            self.core_var.set("就绪")
+        elif cached and cached.state in (MISSING, REPAIRABLE, INVALID):
+            self.core_var.set("需要修复")
+            self._ensure_core()
+        elif cached and cached.state == TRANSIENT:
+            self.core_var.set("暂时无法校验")
+        else:
             self.core_var.set("校验中...")
             if not self._core_verifying:
                 self._core_verifying = True
                 threading.Thread(target=self._verify_core_worker, daemon=True).start()
-        elif core_ok:
-            self.core_var.set("就绪")
-        elif self._core_installing:
-            self.core_var.set("自动下载中...")
-        else:
-            if PATHS.core_exe.exists():
-                self.core_var.set("损坏，正在重装...")
-                try: PATHS.core_exe.unlink()
-                except OSError: pass
-            else:
-                self.core_var.set("缺失")
-            self._ensure_core()
+
         ok,detail=node_source_is_configured(PATHS)
         self.source_var.set(f"就绪（{detail}）" if ok else f"未配置（{detail}）")
         for warning in drain_config_warnings():
@@ -361,37 +361,57 @@ class FlyApp:
 
     def _verify_core_worker(self):
         try:
-            ok = self.core.verify_binary()
+            result = self.core.verify_binary_status()
         finally:
             self._core_verifying = False
-        if ok:
+
+        if result.state == VALID:
             self._ui(lambda: self.core_var.set("就绪"))
-        else:
-            self._ui(lambda: self.core_var.set("缺失或损坏"))
-            self._ui(self._ensure_core)
+            return
+
+        if result.state == TRANSIENT:
+            self.log(f"[CORE] 完整性校验暂时无法完成：{result.detail}")
+            self._ui(lambda: self.core_var.set("暂时无法校验"))
+            return
+
+        self.log(f"[CORE] 内核需要修复：{result.detail}")
+        self._ui(lambda: self.core_var.set("需要修复"))
+        self._ui(self._ensure_core)
 
     def _ensure_core(self):
         if self._core_installing or self._core_verifying:
             return
-        if PATHS.core_exe.exists() and self.core.verified_state():
+        if self.core.is_running():
+            self.log("[CORE] 内核正在运行，本次自动修复已跳过。")
             return
-        if PATHS.core_exe.exists():
-            try: PATHS.core_exe.unlink()
-            except OSError:
-                self.log("[CORE] 损坏的内核正在被占用，无法自动替换。")
-                return
+        cached = self.core.verification_detail()
+        if cached and cached.state == VALID:
+            self.core_var.set("就绪")
+            return
+
         self._core_installing=True
-        self.core_var.set("自动下载中...")
-        self.log("[CORE] 正在从已验证的 MetaCubeX Release 下载兼容内核...")
+        self.core_var.set("自动下载/修复中...")
+        self.log("[CORE] 正在使用固定可信归档修复/安装 Mihomo...")
         def work():
             try:
                 download_core(PATHS,self.log)
+                self.core.invalidate_verify_cache()
             except Exception as e:
-                self.log(f"[CORE] 自动下载失败：{e}（点“刷新状态”会自动重试）")
+                self.log(f"[CORE] 自动修复/下载失败：{e}（不会删除现有可执行文件）")
             finally:
                 self._core_installing=False
                 self._ui(self.refresh_status)
         threading.Thread(target=work,daemon=True).start()
+
+    def _autostart_when_core_ready(self):
+        if self._closing:
+            return
+        if self.core.verified_state() is True:
+            self.start_accel()
+            return
+        if not self._core_installing and not self._core_verifying:
+            self.refresh_status()
+        self.root.after(400, self._autostart_when_core_ready)
 
     def open_settings(self):
         SettingsWindow(self.root,self.profiles,self.refresh_status)
@@ -417,9 +437,13 @@ class FlyApp:
         empty=[self.profile_by_id[p]["name"] for p in effective if not profile_has_effect(self.profile_by_id[p])]
         if empty:
             messagebox.showerror("FLY","以下配置没有任何有效分流规则，已拒绝启动：\n"+"、".join(empty)); return
-        if not self.core.verify_binary():   # 通常命中缓存，不会真的起子进程
-            self._ensure_core()
-            messagebox.showinfo("FLY","加速内核缺失或损坏，正在自动下载安装；完成后再点一键加速。"); return
+        if self._core_verifying:
+            messagebox.showinfo("FLY","正在校验加速内核，请稍后再点一键加速。"); return
+        if self._core_installing:
+            messagebox.showinfo("FLY","正在修复/安装加速内核，请完成后再点一键加速。"); return
+        if self.core.verified_state() is not True:
+            self.refresh_status()
+            messagebox.showinfo("FLY","加速内核尚未通过完整性校验；FLY 不会在验证前执行它。"); return
         ok,_=node_source_is_configured(PATHS)
         if not ok:
             messagebox.showwarning("FLY","请先在设置里配置你自己的节点/订阅。"); return
