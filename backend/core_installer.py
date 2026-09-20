@@ -7,7 +7,7 @@ trusted archive before executing it, instead of using `mihomo -v` as a
 security check.
 """
 from __future__ import annotations
-import hashlib, io, os, tempfile, urllib.request, zipfile
+import hashlib, io, os, tempfile, time, urllib.request, zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -78,7 +78,21 @@ def _write_atomic(target: Path, data: bytes):
             f.write(data)
             f.flush()
             os.fsync(f.fileno())
-        os.replace(tmp, target)
+        delay = 0.02
+        last = None
+        for i in range(8):
+            try:
+                os.replace(tmp, target)
+                last = None
+                break
+            except PermissionError as e:
+                last = e
+                if i == 7:
+                    break
+                time.sleep(delay)
+                delay = min(0.25, delay * 2)
+        if last is not None:
+            raise last
     except PermissionError as e:
         Path(tmp).unlink(missing_ok=True)
         raise RuntimeError(f"{target.name} 正在被占用，无法替换；请先停止加速。") from e
