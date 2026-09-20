@@ -102,6 +102,32 @@ class LauncherTests(unittest.TestCase):
         self.assertTrue((self.td/"backend"/"old.py").exists())
         self.assertEqual((self.td/"VERSION").read_text(),"0.8.10")
 
+    def test_failed_immediate_rollback_keeps_transaction_for_next_start(self):
+        (self.td/"backend").mkdir()
+        (self.td/"backend"/"old.py").write_text("old",encoding="utf-8")
+        (self.td/"main.py").write_text("old main",encoding="utf-8")
+        (self.td/"VERSION").write_text("0.8.10",encoding="utf-8")
+        real_copy=launcher._atomic_file_copy
+        real_restore=launcher._restore_snapshot
+        def fail_version(src,dst):
+            if dst.name=="VERSION": raise OSError("disk full")
+            return real_copy(src,dst)
+        with mock.patch.object(launcher,"_atomic_file_copy",side_effect=fail_version),\
+             mock.patch.object(launcher,"_restore_snapshot",side_effect=PermissionError("AV lock")):
+            with self.assertRaises(RuntimeError):
+                launcher._transactional_install(self._payload(),self.td,self.ui)
+        txn=self.td/"runtime"/launcher.TXN_NAME
+        self.assertTrue((txn/"journal.json").exists())
+        self.assertTrue((txn/"backup"/"backend"/"old.py").exists())
+
+        # Once the external lock is gone, next-start recovery uses the retained
+        # backup and returns the install to the old coherent state.
+        self.assertTrue(launcher.recover_interrupted_update(self.td,self.ui))
+        self.assertTrue((self.td/"backend"/"old.py").exists())
+        self.assertEqual((self.td/"main.py").read_text(),"old main")
+        self.assertEqual((self.td/"VERSION").read_text(),"0.8.10")
+        self.assertFalse(txn.exists())
+
     def test_recovery_rolls_back_interrupted_transaction(self):
         (self.td/"backend").mkdir()
         (self.td/"backend"/"new.py").write_text("bad partial",encoding="utf-8")
