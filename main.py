@@ -8,7 +8,7 @@ from backend.config import (
     Paths, ensure_private_files, list_routing_profiles, profile_from_url,
     load_app_settings, load_node_source, load_custom_profiles, save_custom_profiles,
     node_source_is_configured, save_json, app_version, validate_profile,
-    drain_config_warnings, profile_has_effect
+    drain_config_warnings, profile_has_effect, update_app_settings
 )
 from backend.core_installer import install_core as download_core
 from backend.core_manager import CoreManager, DialFailureTracker
@@ -203,9 +203,7 @@ class FlyApp:
         return [r["id"] for r in self.profiles if self.profile_vars.get(r["id"]) and self.profile_vars[r["id"]].get()]
 
     def _services_toggled(self):
-        app=load_app_settings(PATHS)
-        app["services_enabled"]=bool(self.services_var.get())
-        save_json(PATHS.app_settings,app)
+        update_app_settings(PATHS, {"services_enabled": bool(self.services_var.get())})
         state="开启" if self.services_var.get() else "关闭"
         self.log(f"[SERVICES] 常用服务默认加速已{state}。")
         if self.core.is_running():
@@ -495,10 +493,9 @@ class FlyApp:
 
     def _remember_node(self,name):
         try:
-            s=load_app_settings(PATHS)
-            if s.get("last_node")!=name:
-                s["last_node"]=name; save_json(PATHS.app_settings,s)
-        except Exception: pass
+            update_app_settings(PATHS, {"last_node": str(name)})
+        except Exception:
+            pass
 
     def _on_core_line(self, line):
         """内核日志钩子（跑在读日志线程上，只做最轻量的判断）。"""
@@ -682,18 +679,19 @@ class SettingsWindow(tk.Toplevel):
         save_json(PATHS.node_source,{"mode":self.mode.get(),
                                      "subscription_urls":urls,
                                      "subscription_url":urls[0] if urls else ""})
-        app=load_app_settings(PATHS)
-        exes=app.get("game_exes",{})
+        values={}
         for pid,var in self.exe_vars.items():
             value=var.get().strip()
             name=Path(value).name if value else ""
             if any(ch in name for ch in (",","#","\n","\r")):
                 messagebox.showerror("FLY",f"可执行文件名含分流规则不允许的字符：{name}"); return
-            exes[pid]=value
-        app["game_exes"]=exes
-        app["latency_timeout_ms"]=timeout
-        app["sticky_max_delay_ms"]=sticky
-        save_json(PATHS.app_settings,app)
+            values[pid]=value
+        def mutate(app):
+            exes=dict(app.get("game_exes",{})); exes.update(values)
+            app["game_exes"]=exes
+            app["latency_timeout_ms"]=timeout
+            app["sticky_max_delay_ms"]=sticky
+        update_app_settings(PATHS, mutator=mutate)
         self.on_saved(); messagebox.showinfo("FLY","设置已保存。"); self.destroy()
 
 class CustomSitesWindow(tk.Toplevel):
