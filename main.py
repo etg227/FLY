@@ -18,6 +18,7 @@ from backend.mihomo_api import MihomoApi, JapanNodeSelector
 from backend.privacy import redact_log_line
 from backend.subscription import check_subscription, describe_userinfo, fmt_bytes, fmt_speed
 from backend.system_proxy import SystemProxy
+from backend.self_update import schedule_launcher_replace
 from backend.windows_admin import is_admin, relaunch_as_admin
 
 APP_DIR = Path(__file__).resolve().parent
@@ -57,6 +58,7 @@ class FlyApp:
             self._log_file.flush()
         except OSError:
             pass
+        schedule_launcher_replace(PATHS.app, self.log)
         self.core = CoreManager(PATHS, self.log, on_exit=self._on_core_exit,
                                 on_line=self._on_core_line)
         self.sysproxy = SystemProxy(PATHS.runtime / "sysproxy_backup.json", self.log)
