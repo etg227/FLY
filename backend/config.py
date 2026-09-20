@@ -151,6 +151,17 @@ def _safe_int(value, default, minimum=None, maximum=None):
     if maximum is not None: n = min(int(maximum), n)
     return n
 
+def _safe_bool(value, default=False):
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str):
+        s=value.strip().casefold()
+        if s in ("1","true","yes","on"): return True
+        if s in ("0","false","no","off",""): return False
+    return bool(default)
+
 def _valid_http_url(value):
     try:
         p = urlparse(str(value).strip())
@@ -197,12 +208,16 @@ def load_app_settings(paths):
 
     game_exes = raw.get("game_exes", {})
     if isinstance(game_exes, dict):
-        data["game_exes"] = {str(k): str(v or "").strip() for k, v in game_exes.items()}
+        data["game_exes"] = {
+            str(k): str(v).strip()
+            for k, v in game_exes.items()
+            if isinstance(v, str)
+        }
     elif game_exes not in (None, {}):
         _warn("app_settings.json 的 game_exes 类型错误，已忽略。")
         changed = True
 
-    data["services_enabled"] = bool(raw.get("services_enabled", True))
+    data["services_enabled"] = _safe_bool(raw.get("services_enabled", True), True)
     data["mixed_port"] = _safe_int(raw.get("mixed_port", 17890), 17890, 1024, 65535)
     data["controller_port"] = _safe_int(raw.get("controller_port", 19090), 19090, 1024, 65535)
     if data["mixed_port"] == data["controller_port"]:
@@ -324,8 +339,8 @@ def _normalize_profile(rule, source="builtin"):
         latency = [legacy]
     r["latency_test_urls"] = list(dict.fromkeys(latency))
 
-    r["full_browser"] = bool(r.get("full_browser"))
-    r["always_on"] = bool(r.get("always_on"))
+    r["full_browser"] = _safe_bool(r.get("full_browser"), False)
+    r["always_on"] = _safe_bool(r.get("always_on"), False)
     r["invalid_values"] = dropped
     return r
 
@@ -387,20 +402,20 @@ def save_custom_profiles(paths, profiles):
             cleaned.append(p)
     save_json(paths.custom_profiles, {"profiles": cleaned})
 
-_COMMON_SLD = {"co","com","net","org","gov","edu","ac","go","or","ne"}
 _SHARED_TENANT_SUFFIXES = {
     "github.io","pages.dev","blogspot.com","appspot.com","workers.dev",
     "vercel.app","netlify.app","web.app","firebaseapp.com","herokuapp.com",
     "azurewebsites.net","onrender.com","railway.app","surge.sh",
-    "s3.amazonaws.com","notion.site",
+    "amazonaws.com","cloudfront.net","notion.site","githubusercontent.com",
+    "storage.googleapis.com","azureedge.net",
 }
 
 def registrable_domain(host):
-    """Choose a useful site suffix without swallowing shared-hosting tenants.
+    """Choose a conservative domain for a one-URL custom profile.
 
-    Normal www.foo.com becomes foo.com so sibling API/image subdomains follow
-    the same custom profile. Known multi-tenant hosting suffixes deliberately
-    stay on the exact hostname (user.github.io never becomes github.io).
+    We only widen the extremely common `www.example.tld` form. Arbitrary
+    subdomains stay exact, which prevents api.foo.cloudfront.net or
+    bucket.amazonaws.com from accidentally routing an entire shared platform.
     """
     host = _idna_host(host)
     if not host:
@@ -413,11 +428,8 @@ def registrable_domain(host):
     for suffix in _SHARED_TENANT_SUFFIXES:
         if host == suffix or host.endswith("." + suffix):
             return host
-    labels=[x for x in host.split(".") if x]
-    if len(labels)>=3 and labels[-2] in _COMMON_SLD and len(labels[-1])<=3:
-        return ".".join(labels[-3:])
-    if len(labels)>=2:
-        return ".".join(labels[-2:])
+    if host.startswith("www.") and host.count(".") >= 2:
+        return host[4:]
     return host
 
 def profile_from_url(raw_url, name=""):
