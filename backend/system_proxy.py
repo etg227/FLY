@@ -24,10 +24,15 @@ def _read_current():
 
 def _write(values):
     import winreg
+    desired = int(values.get("ProxyEnable", 0))
     with winreg.OpenKey(winreg.HKEY_CURRENT_USER, REG_PATH, 0, winreg.KEY_SET_VALUE) as k:
-        winreg.SetValueEx(k, "ProxyEnable", 0, winreg.REG_DWORD, int(values.get("ProxyEnable", 0)))
+        # Fail-safe ordering: disable first, write complete parameters, then
+        # enable last. A mid-write failure leaves DIRECT rather than a half-
+        # configured enabled proxy.
+        winreg.SetValueEx(k, "ProxyEnable", 0, winreg.REG_DWORD, 0)
         winreg.SetValueEx(k, "ProxyServer", 0, winreg.REG_SZ, str(values.get("ProxyServer", "")))
         winreg.SetValueEx(k, "ProxyOverride", 0, winreg.REG_SZ, str(values.get("ProxyOverride", "")))
+        winreg.SetValueEx(k, "ProxyEnable", 0, winreg.REG_DWORD, desired)
     _refresh()
 
 def _refresh():
@@ -73,11 +78,22 @@ class SystemProxy:
         }
         self.backup_path.parent.mkdir(parents=True, exist_ok=True)
         save_json(self.backup_path, backup)
-        _write({
-            "ProxyEnable": 1,
-            "ProxyServer": expected,
-            "ProxyOverride": PROXY_OVERRIDE,
-        })
+        try:
+            _write({
+                "ProxyEnable": 1,
+                "ProxyServer": expected,
+                "ProxyOverride": PROXY_OVERRIDE,
+            })
+        except Exception:
+            # enable() has not returned yet, so the caller cannot know the
+            # registry was partially touched. Restore here before re-raising.
+            try:
+                _write(original)
+                self.log("[PROXY] 启用失败，已回滚原系统代理设置。")
+                self._remove_backup()
+            except Exception as rollback_error:
+                self.log(f"[PROXY] 启用失败且回滚未完成：{rollback_error}；保留备份供下次启动恢复。")
+            raise
         self.log(f"[PROXY] System proxy -> {expected}; unmatched destinations remain DIRECT.")
 
     def restore(self):
