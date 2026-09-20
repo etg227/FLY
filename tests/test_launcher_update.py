@@ -8,7 +8,9 @@ from unittest import mock
 # 只吞 ImportError —— launcher.py 真有语法错误时照样会炸出来。
 try:
     import launcher
-except ImportError as exc:
+except ModuleNotFoundError as exc:
+    if exc.name not in ("tkinter", "_tkinter"):
+        raise
     launcher, HAVE_TK, SKIP_REASON = None, False, f"launcher 需要 tkinter（{exc}）"
 else:
     HAVE_TK, SKIP_REASON = True, ""
