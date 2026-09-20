@@ -62,6 +62,18 @@ def _lock_for(path: Path):
     with _JSON_LOCKS_GUARD:
         return _JSON_LOCKS.setdefault(key, threading.RLock())
 
+def _backup_broken_config(path: Path):
+    """Keep one forensic copy before falling back; never overwrite it repeatedly."""
+    try:
+        if not path.exists():
+            return None
+        backup = path.with_name(path.name + ".broken")
+        if not backup.exists():
+            shutil.copy2(path, backup)
+        return backup
+    except OSError:
+        return None
+
 def load_json(path: Path, default, expect=None):
     """Read JSON defensively.
 
@@ -76,10 +88,17 @@ def load_json(path: Path, default, expect=None):
     except FileNotFoundError:
         return _fallback(default)
     except Exception as e:
-        _warn(f"{path.name} 无法解析，已使用安全默认值：{e}")
+        backup = _backup_broken_config(path)
+        suffix = f"；原文件备份为 {backup.name}" if backup else ""
+        _warn(f"{path.name} 无法解析，已使用安全默认值：{e}{suffix}")
         return _fallback(default)
     if expect is not None and not isinstance(data, expect):
-        _warn(f"{path.name} 顶层类型错误（应为 {getattr(expect,'__name__',expect)}），已使用安全默认值。")
+        backup = _backup_broken_config(path)
+        suffix = f"；原文件备份为 {backup.name}" if backup else ""
+        _warn(
+            f"{path.name} 顶层类型错误（应为 {getattr(expect,'__name__',expect)}），"
+            f"已使用安全默认值{suffix}。"
+        )
         return _fallback(default)
     return data
 
