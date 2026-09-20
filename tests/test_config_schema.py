@@ -59,6 +59,14 @@ class SettingsSchemaTests(TempApp):
             self.assertIn("mixed_port", load_app_settings(self.p))
             self.assertEqual(load_custom_profiles(self.p), [])
 
+    def test_broken_json_is_backed_up_before_fallback(self):
+        original='{"mode":"subscription","subscription_urls":['
+        self.p.node_source.write_text(original,encoding="utf-8")
+        self.assertEqual(load_node_source(self.p)["subscription_urls"],[])
+        backup=self.p.node_source.with_name(self.p.node_source.name+".broken")
+        self.assertTrue(backup.exists())
+        self.assertEqual(backup.read_text(encoding="utf-8"),original)
+
     def test_nested_settings_are_normalized(self):
         save_json(self.p.app_settings, {
             "game_exes": [], "mixed_port":"bad", "controller_port":17890,
