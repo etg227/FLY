@@ -32,6 +32,15 @@ class FakeFetch:
 class IntegrityTests(unittest.TestCase):
     def setUp(self):
         self.paths=Paths(Path(tempfile.mkdtemp())); self.logs=[]
+    def test_launcher_pins_the_same_version(self):
+        """launcher.py 里有一份副本，改版本时两处必须一起改。"""
+        import re
+        text = Path(__file__).resolve().parent.parent.joinpath("launcher.py").read_text(encoding="utf-8")
+        m = re.search(r'^CORE_VERSION\s*=\s*"([^"]+)"', text, re.M)
+        self.assertIsNotNone(m, "launcher.py 里找不到 CORE_VERSION")
+        self.assertEqual(m.group(1), CORE_VERSION,
+                         "launcher.py 与 backend/core_installer.py 的内核版本不一致")
+
     def test_core_version_is_pinned(self):
         self.assertEqual(CORE_VERSION,"v1.19.31")
         self.assertEqual(MIRRORS,[""])

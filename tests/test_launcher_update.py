@@ -2,7 +2,17 @@
 import hashlib, io, json, shutil, tempfile, unittest, zipfile
 from pathlib import Path
 from unittest import mock
-import launcher
+
+# launcher 在 import 阶段就要 tkinter；没有 tk 的环境（部分 Linux）应当跳过，
+# 而不是让整个测试套件在收集阶段就失败。CI 用 windows-latest，原生自带。
+# 只吞 ImportError —— launcher.py 真有语法错误时照样会炸出来。
+try:
+    import launcher
+except ImportError as exc:
+    launcher, HAVE_TK, SKIP_REASON = None, False, f"launcher 需要 tkinter（{exc}）"
+else:
+    HAVE_TK, SKIP_REASON = True, ""
+
 
 class UI:
     def __init__(self):self.lines=[]
@@ -10,6 +20,7 @@ class UI:
     def progress(self,x):pass
     def status(self,x):pass
 
+@unittest.skipUnless(HAVE_TK, SKIP_REASON)
 class LauncherTests(unittest.TestCase):
     def setUp(self):
         self.td=Path(tempfile.mkdtemp()); (self.td/"runtime").mkdir()

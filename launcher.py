@@ -27,6 +27,8 @@ TXN_NAME = "update-txn"
 PYTHON_VERSION = "3.12.10"
 PYTHON_URLS = [f"https://www.python.org/ftp/python/{PYTHON_VERSION}/python-{PYTHON_VERSION}-amd64.exe"]
 
+# 版本号的唯一真相在 backend/core_installer.py；此处是打包进 exe 的副本，
+# 两者必须一致，tests/test_core_integrity.py 会断言。改版本时两处一起改。
 CORE_VERSION = "v1.19.31"
 CORE_API = f"https://api.github.com/repos/MetaCubeX/mihomo/releases/tags/{CORE_VERSION}"
 CORE_PATTERNS = (r"^mihomo-windows-amd64-v1-v[0-9].*\.zip$", r"^mihomo-windows-amd64.*\.zip$")

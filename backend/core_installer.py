@@ -113,8 +113,12 @@ def install_core(paths, log, fetch=None):
     except Exception as e:
         # 镜像给的元数据里 digest 是它自己写的，无法自证，所以宁可不装
         raise RuntimeError(
-            "无法从 GitHub 官方接口获取版本信息；出于安全考虑不会改用镜像下载内核。"
-            "可以稍后重试，或手动下载 mihomo-windows-amd64 的 exe 放到 core\\mihomo.exe。"
+            "无法从 GitHub 官方接口获取版本信息；出于安全考虑不会改用镜像下载内核。\n"
+            "可以稍后重试，或手动安装：\n"
+            f"  1. 打开 https://github.com/MetaCubeX/mihomo/releases/tag/{CORE_VERSION}\n"
+            "  2. 下载 mihomo-windows-amd64-<版本>.zip（不要用 go120/compatible 之外的变体）\n"
+            f"  3. 解压出的 exe 改名放到 {paths.core_exe}\n"
+            f"注意必须是 {CORE_VERSION}，FLY 启动时会校验内核自报的版本。\n"
             f"（原因：{e}）") from e
     release = json.loads(meta.decode("utf-8", errors="replace"))
 

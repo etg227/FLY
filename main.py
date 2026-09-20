@@ -67,6 +67,7 @@ class FlyApp:
         self._watch_stop = None
         self._traffic_stop = None
         self._core_installing = False
+        self._core_verifying = False
         # 启动是个几十秒的后台流程，中途可能被“停止”或关窗打断。
         # 没有取消机制的话，worker 会在窗口销毁之后才去开系统代理，
         # 于是代理永久指向一个死端口——浏览器断网到下次启动 FLY。
@@ -259,8 +260,14 @@ class FlyApp:
             self.root.after(100,self.flush_logs)
 
     def refresh_status(self):
-        core_ok = self.core.verify_binary(timeout=4) if PATHS.core_exe.exists() else False
-        if core_ok:
+        # 校验内核要起子进程，绝不能卡在 UI 线程上——没有缓存结果就后台校验
+        core_ok = self.core.verified_state() if PATHS.core_exe.exists() else False
+        if core_ok is None:
+            self.core_var.set("校验中...")
+            if not self._core_verifying:
+                self._core_verifying = True
+                threading.Thread(target=self._verify_core_worker, daemon=True).start()
+        elif core_ok:
             self.core_var.set("就绪")
         elif self._core_installing:
             self.core_var.set("自动下载中...")
@@ -352,10 +359,21 @@ class FlyApp:
             total_timeout_s=35
         )
 
+    def _verify_core_worker(self):
+        try:
+            ok = self.core.verify_binary()
+        finally:
+            self._core_verifying = False
+        if ok:
+            self._ui(lambda: self.core_var.set("就绪"))
+        else:
+            self._ui(lambda: self.core_var.set("缺失或损坏"))
+            self._ui(self._ensure_core)
+
     def _ensure_core(self):
-        if self._core_installing:
+        if self._core_installing or self._core_verifying:
             return
-        if PATHS.core_exe.exists() and self.core.verify_binary(timeout=4):
+        if PATHS.core_exe.exists() and self.core.verified_state():
             return
         if PATHS.core_exe.exists():
             try: PATHS.core_exe.unlink()
@@ -399,7 +417,7 @@ class FlyApp:
         empty=[self.profile_by_id[p]["name"] for p in effective if not profile_has_effect(self.profile_by_id[p])]
         if empty:
             messagebox.showerror("FLY","以下配置没有任何有效分流规则，已拒绝启动：\n"+"、".join(empty)); return
-        if not self.core.verify_binary(timeout=4):
+        if not self.core.verify_binary():   # 通常命中缓存，不会真的起子进程
             self._ensure_core()
             messagebox.showinfo("FLY","加速内核缺失或损坏，正在自动下载安装；完成后再点一键加速。"); return
         ok,_=node_source_is_configured(PATHS)

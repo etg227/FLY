@@ -93,6 +93,7 @@ class CoreManager:
         self.on_exit = on_exit
         self.on_line = on_line
         self._cleanup_lock = threading.Lock()
+        self._verify_cache = None
 
     def is_installed(self):
         try:
@@ -101,6 +102,36 @@ class CoreManager:
             return False
 
     def verify_binary(self, timeout=8):
+        """校验内核可执行文件；结果按文件指纹缓存。
+
+        每次都起一个子进程跑 `mihomo -v` 太重：首次运行遇上杀软扫描很容易
+        超时，被误判成「内核损坏」并触发重新下载。只缓存成功结果——失败可能
+        只是一次瞬时超时，不该被粘住。"""
+        try:
+            st = self.paths.core_exe.stat()
+            key = (st.st_mtime_ns, st.st_size)
+        except OSError:
+            self._verify_cache = None
+            return False
+        cached = self._verify_cache
+        if cached and cached[0] == key:
+            return True
+        if self._verify_binary_uncached(timeout):
+            self._verify_cache = (key, True)
+            return True
+        self._verify_cache = None
+        return False
+
+    def verified_state(self):
+        """已知的校验结果；没校验过就返回 None，绝不在调用线程上起子进程。"""
+        try:
+            st = self.paths.core_exe.stat()
+        except OSError:
+            return False
+        cached = self._verify_cache
+        return True if cached and cached[0] == (st.st_mtime_ns, st.st_size) else None
+
+    def _verify_binary_uncached(self, timeout):
         if not self.is_installed():
             return False
         try:

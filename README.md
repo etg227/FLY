@@ -123,6 +123,37 @@ pyw main.py
 py -3 main.py
 ```
 
+## 加速内核
+
+FLY 使用 [mihomo](https://github.com/MetaCubeX/mihomo) 作为内核，**版本固定在 `v1.19.31`**，
+首次启动时自动下载安装。
+
+固定版本是为了让下载内容可以被校验：
+
+- release 元数据只从 `api.github.com` 直连获取，镜像提供的元数据无法自证，因此不采信；
+- 拿到官方校验基准（asset digest 或同一 release 的校验文件）后，安装包本体才允许走镜像加速，
+  下载完按 SHA-256 比对，不一致直接拒绝安装；
+- 拿不到任何校验基准时，只接受官方直连下载；
+- 启动前还会执行 `mihomo -v`，确认内核自报的版本与固定版本一致。
+
+### 内核下载不了怎么办
+
+如果 `api.github.com` 不可达，FLY 不会退而求其次去镜像下载未经校验的可执行文件，
+而是提示手动安装：
+
+1. 打开 <https://github.com/MetaCubeX/mihomo/releases/tag/v1.19.31>
+2. 下载 `mihomo-windows-amd64-<版本>.zip`
+3. 解压出的 exe 改名为 `mihomo.exe`，放到 FLY 目录下的 `core\mihomo.exe`
+
+必须是 `v1.19.31`，其它版本会在启动校验时被拒绝。
+
+### 升级内核版本
+
+版本号写在两处，必须同时修改，否则 `tests/test_core_integrity.py` 会失败：
+
+- `backend/core_installer.py` 的 `CORE_VERSION`
+- `launcher.py` 的 `CORE_VERSION`（打包进 launcher.exe 的副本）
+
 ## 节点来源
 
 FLY 只使用用户自己提供的节点：
