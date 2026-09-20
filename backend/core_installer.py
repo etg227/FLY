@@ -28,7 +28,8 @@ def _source_name(prefix):
 def _get(url, prefix="", timeout=30, log=None, progress_tag=None):
     req = urllib.request.Request(prefix + url, headers={
         "User-Agent": "FLY-Core-Installer", "Accept": "application/vnd.github+json"})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    with opener.open(req, timeout=timeout) as resp:
         total = int(resp.headers.get("Content-Length") or 0)
         buf, done, last_pct = io.BytesIO(), 0, -10
         while True:
