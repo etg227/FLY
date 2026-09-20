@@ -67,4 +67,4 @@ jobs:
             Write-Host "$tag already exists; skipping duplicate release."
             exit 0
           }
-          gh release create $tag "dist\launcher.exe#launcher.exe" "dist\FLY-update.zip#FLY-update.zip" "dist\FLY-update.zip.sha256#FLY-update.zip.sha256" --target "$env:GITHUB_SHA" --title "FLY $tag" --notes "v0.8.9 fixes provider-aware node latency tests and DMM dmmgames.com routing, with regression tests before release."
+          gh release create $tag "dist\launcher.exe#launcher.exe" "dist\FLY-update.zip#FLY-update.zip" "dist\FLY-update.zip.sha256#FLY-update.zip.sha256" --target "$env:GITHUB_SHA" --title "FLY $tag" --notes "v0.8.10 hardens provider-index recovery, startup cancellation, core-crash handling, rule safety, subscription probing, and faster node failover. Regression tests run before release."
