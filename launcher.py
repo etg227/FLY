@@ -162,8 +162,16 @@ def _read_manifest(top: Path):
         data = json.loads(manifest.read_text(encoding="utf-8-sig"))
     except Exception as e:
         raise RuntimeError(f"更新清单损坏：{e}") from e
-    requested_dirs = set(data.get("managed_dirs", []))
-    requested_roots = set(data.get("managed_root", []))
+    if not isinstance(data, dict) or data.get("schema") != 1:
+        raise RuntimeError("更新清单 schema 无效，已拒绝更新。")
+    dirs_value = data.get("managed_dirs", [])
+    roots_value = data.get("managed_root", [])
+    if not isinstance(dirs_value, list) or not isinstance(roots_value, list):
+        raise RuntimeError("更新清单 managed_dirs/managed_root 必须是数组。")
+    if not all(isinstance(x, str) for x in dirs_value + roots_value):
+        raise RuntimeError("更新清单路径必须是字符串。")
+    requested_dirs = set(dirs_value)
+    requested_roots = set(roots_value)
     unknown_dirs = requested_dirs - set(MANAGED_DIRS)
     unknown_roots = requested_roots - set(MANAGED_ROOT)
     if unknown_dirs or unknown_roots:
