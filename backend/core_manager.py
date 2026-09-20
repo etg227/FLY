@@ -1,44 +1,38 @@
 from __future__ import annotations
-import ctypes, os, socket, subprocess, threading, time
+import ctypes, json, os, socket, subprocess, threading, time, urllib.error, urllib.request
 from .config import Paths, load_app_settings
-from .mihomo_config import build_runtime_config
+from .mihomo_config import build_runtime_config, redact_runtime_config
 
 class CoreError(RuntimeError): pass
 
 class DialFailureTracker:
-    """统计内核报出的出站失败。
-
-    节点被墙时内核每隔几秒就报一次 dial 失败，而看门狗要 60 秒 x 3 轮才会
-    换节点——中间那三分钟界面显示“加速中”，实际什么都打不开。窗口内失败
-    次数够多就返回 True，让上层立刻去重选节点。"""
-
-    def __init__(self, group="FLY-JP", window=20.0, trigger=5, cooldown=60.0, clock=time.time):
+    """Track real outbound failures reported by mihomo."""
+    def __init__(self, group="FLY-JP", window=20.0, trigger=5, cooldown=15.0, clock=time.time):
         self.group, self.window, self.trigger, self.cooldown = group, window, trigger, cooldown
         self._clock = clock
         self._fails = []
         self._last_trigger = 0.0
+        self._lock = threading.Lock()
 
     def feed(self, line):
-        """喂一行内核日志；返回 True 表示应当立刻重新选择节点。"""
         if f"dial {self.group}" not in line or "error:" not in line:
             return False
-        now = self._clock()
-        self._fails = [t for t in self._fails if now - t < self.window]
-        self._fails.append(now)
-        if len(self._fails) < self.trigger or now - self._last_trigger <= self.cooldown:
-            return False
-        self._last_trigger = now
-        self._fails.clear()
-        return True
+        with self._lock:
+            now = self._clock()
+            self._fails = [t for t in self._fails if now - t < self.window]
+            self._fails.append(now)
+            if len(self._fails) < self.trigger or now - self._last_trigger <= self.cooldown:
+                return False
+            self._last_trigger = now
+            self._fails.clear()
+            return True
 
     def reset(self):
-        self._fails.clear()
-        self._last_trigger = 0.0
+        with self._lock:
+            self._fails.clear()
+            self._last_trigger = 0.0
 
 def _create_kill_on_close_job():
-    """A Windows Job Object with KILL_ON_JOB_CLOSE: when our process dies for
-    ANY reason (crash, task-manager kill), the OS closes the handle and takes
-    the core down with us — no orphaned mihomo keeps proxying."""
     if os.name != "nt":
         return None
     try:
@@ -68,7 +62,7 @@ def _create_kill_on_close_job():
         if not job:
             return None
         info = EXTENDED_LIMITS()
-        info.BasicLimitInformation.LimitFlags = 0x2000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        info.BasicLimitInformation.LimitFlags = 0x2000
         if not kernel32.SetInformationJobObject(job, 9, ctypes.byref(info), ctypes.sizeof(info)):
             kernel32.CloseHandle(job)
             return None
@@ -76,26 +70,51 @@ def _create_kill_on_close_job():
     except Exception:
         return None
 
+def _port_is_free(port):
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 0)
+        sock.bind(("127.0.0.1", int(port)))
+        return True
+    except OSError:
+        return False
+    finally:
+        sock.close()
+
 class CoreManager:
     def __init__(self, paths: Paths, log, on_exit=None, on_line=None):
         self.paths, self.log = paths, log
         self.process = None
         self.reader_thread = None
         self._job = None
-        # 内核可能在任何时刻自己死掉（崩溃、被杀软终止、端口被抢）。
-        # 没人盯着的话系统代理会一直指向一个死端口，浏览器全网断，
-        # 而界面仍显示“加速中”。on_exit 让上层能立刻收拾现场。
         self._stopping = False
+        self._starting = False
         self.on_exit = on_exit
-        # 内核每条日志也给上层一份：出站失败是「节点挂了」最快的信号，
-        # 比等看门狗自己去探测快得多。
         self.on_line = on_line
-        # 残留清理是按内核路径匹配的，跟我们自己刚启动的那个一模一样。
-        # 用同一把锁把「扫描并杀」和「启动内核」串起来，否则后台清理
-        # 可能正好杀掉自己刚 Popen 出来的进程（提权 autostart 最容易撞）。
         self._cleanup_lock = threading.Lock()
 
-    def is_installed(self): return self.paths.core_exe.exists()
+    def is_installed(self):
+        try:
+            return self.paths.core_exe.exists() and self.paths.core_exe.stat().st_size > 1024 * 1024
+        except OSError:
+            return False
+
+    def verify_binary(self, timeout=8):
+        if not self.is_installed():
+            return False
+        try:
+            with self.paths.core_exe.open("rb") as f:
+                if f.read(2) != b"MZ":
+                    return False
+            r = subprocess.run([str(self.paths.core_exe), "-v"],
+                               cwd=str(self.paths.app), stdout=subprocess.PIPE,
+                               stderr=subprocess.STDOUT, text=True, encoding="utf-8",
+                               errors="replace", timeout=timeout,
+                               creationflags=self._flags())
+            return r.returncode == 0 and "mihomo" in (r.stdout or "").lower()
+        except Exception:
+            return False
+
     def is_running(self): return self.process is not None and self.process.poll() is None
     def _flags(self): return subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
 
@@ -109,16 +128,14 @@ class CoreManager:
                 if not ctypes.windll.kernel32.AssignProcessToJobObject(self._job, int(proc._handle)):
                     raise ctypes.WinError()
         except Exception as e:
-            self.log(f"[CORE] Job 绑定失败（不影响正常使用，仅影响强杀后的自动清理）：{e}")
+            self.log(f"[CORE] Job 绑定失败（强杀 FLY 后可能留下内核进程）：{e}")
 
     def cleanup_orphans(self):
-        """Kill leftover mihomo processes from a crashed/killed previous run —
-        matched strictly by OUR core path so a user's own Clash is untouched."""
         if os.name != "nt" or not self.is_installed():
             return
         with self._cleanup_lock:
             if self.process is not None:
-                return          # 自己的内核正在跑，这时候扫就是自杀
+                return
             self._cleanup_orphans_locked()
 
     def _cleanup_orphans_locked(self):
@@ -128,14 +145,14 @@ class CoreManager:
               "if ($p) { $p | Stop-Process -Force; ($p | Measure-Object).Count }")
         try:
             r = subprocess.run(["powershell.exe", "-NoProfile", "-Command", ps],
-                               capture_output=True, text=True, timeout=20,
+                               capture_output=True, text=True, timeout=6,
                                creationflags=self._flags())
             n = (r.stdout or "").strip()
             if n and n != "0":
                 self.log(f"[CORE] 清理了 {n} 个上次残留的内核进程。")
-                time.sleep(0.5)  # let the ports free up
-        except Exception:
-            pass
+                time.sleep(0.3)
+        except Exception as e:
+            self.log(f"[CORE] 残留进程检查已跳过：{e}")
 
     def _read_output(self, proc):
         try:
@@ -146,56 +163,86 @@ class CoreManager:
                         continue
                     self.log("[CORE] " + line)
                     if self.on_line:
-                        try:
-                            self.on_line(line)
-                        except Exception:
-                            pass          # 日志钩子永远不能拖垮读日志的线程
+                        try: self.on_line(line)
+                        except Exception: pass
         except Exception as e:
             self.log(f"[CORE] log reader stopped: {e}")
         finally:
-            # 管道读完 == 进程已经结束，这是最早能察觉内核退出的时刻。
             self._notify_exit(proc)
 
     def _notify_exit(self, proc):
-        """内核进程结束时触发；主动 stop() 不算意外退出。"""
         if self._stopping or proc is not self.process:
             return
-        try:
-            code = proc.wait(timeout=5)
-        except Exception:
-            code = proc.poll()
+        try: code = proc.wait(timeout=2)
+        except Exception: code = proc.poll()
         self.process = None
+        if self._starting:
+            self.log(f"[CORE] 内核在启动阶段退出（exit code: {code}）。")
+            return
         self.log(f"[CORE] 内核意外退出（exit code: {code}）——加速已中断。")
         if self.on_exit:
-            try:
-                self.on_exit(code)
-            except Exception as e:
-                self.log(f"[CORE] exit handler failed: {e}")
+            try: self.on_exit(code)
+            except Exception as e: self.log(f"[CORE] exit handler failed: {e}")
 
     def validate(self, home, cfg):
-        if not self.is_installed():
-            raise CoreError("Mihomo core is not installed.")
-        result = subprocess.run(
-            [str(self.paths.core_exe), "-t", "-d", str(home), "-f", str(cfg)],
-            cwd=str(self.paths.app),
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, encoding="utf-8", errors="replace",
-            creationflags=self._flags(), timeout=25
-        )
-        if result.stdout.strip():
-            for line in result.stdout.splitlines():
+        if not self.verify_binary():
+            raise CoreError("Mihomo 内核文件无效或损坏，请删除 core\\mihomo.exe 后重新下载。")
+        self.log("[CORE] 正在验证生成的配置...")
+        try:
+            result = subprocess.run(
+                [str(self.paths.core_exe), "-t", "-d", str(home), "-f", str(cfg)],
+                cwd=str(self.paths.app),
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, encoding="utf-8", errors="replace",
+                creationflags=self._flags(), timeout=15
+            )
+        except subprocess.TimeoutExpired as e:
+            raise CoreError("Mihomo 配置验证超时。") from e
+        output = (result.stdout or "").strip()
+        if output:
+            for line in output.splitlines():
                 self.log("[CHECK] " + line)
         if result.returncode != 0:
-            raise CoreError("Mihomo rejected the generated configuration.")
+            detail = "\n".join(output.splitlines()[-8:]) if output else "无详细输出"
+            raise CoreError("Mihomo 拒绝生成的配置：\n" + detail)
+
+    def _preflight_ports(self, settings):
+        occupied = [p for p in (settings["mixed_port"], settings["controller_port"]) if not _port_is_free(p)]
+        if occupied:
+            raise CoreError(
+                "FLY 所需本地端口已被其他程序占用：" + ", ".join(map(str, occupied)) +
+                "。请关闭另一份 FLY/Clash/Mihomo，或修改端口后重试。")
+
+    def _controller_ready(self, port, secret):
+        url = f"http://127.0.0.1:{int(port)}/version"
+        headers = {"Authorization": f"Bearer {secret}"} if secret else {}
+        req = urllib.request.Request(url, headers=headers)
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        try:
+            with opener.open(req, timeout=0.5) as resp:
+                if resp.status != 200:
+                    return False
+                data = json.loads(resp.read().decode("utf-8", errors="replace") or "{}")
+                return isinstance(data, dict) and bool(data)
+        except Exception:
+            return False
 
     def start(self, game_ids):
         self.stop()
+        self.log("[CORE] 检查残留进程...")
         self.cleanup_orphans()
-        home, cfg = build_runtime_config(self.paths, game_ids, log=self.log)
+        settings = load_app_settings(self.paths)
+        self._preflight_ports(settings)
+
+        self.log("[CORE] 生成运行配置...")
+        home, cfg, sensitive_urls = build_runtime_config(self.paths, game_ids, log=self.log)
         self.validate(home, cfg)
-        # 拿着同一把锁再启动：后台清理要么已经跑完，要么会看到 process 非空而跳过
+
         with self._cleanup_lock:
+            # Recheck immediately before Popen to narrow the TOCTOU window.
+            self._preflight_ports(settings)
             self._stopping = False
+            self._starting = True
             self.process = subprocess.Popen(
                 [str(self.paths.core_exe), "-d", str(home), "-f", str(cfg)],
                 cwd=str(self.paths.app),
@@ -204,27 +251,40 @@ class CoreManager:
                 text=True, encoding="utf-8", errors="replace",
                 creationflags=self._flags()
             )
-        self._assign_job(self.process)
-        self.reader_thread = threading.Thread(target=self._read_output, args=(self.process,), daemon=True)
-        self.reader_thread.start()
-        port = int(load_app_settings(self.paths).get("controller_port",19090))
-        deadline = time.time() + 15
-        while time.time() < deadline:
-            try:
-                with socket.create_connection(("127.0.0.1", port), timeout=0.5):
-                    self.log("[CORE] Mihomo is ready.")
-                    return
-            except OSError:
-                time.sleep(0.2)
         proc = self.process
-        code = proc.poll() if proc else None
+        self._assign_job(proc)
+        self.reader_thread = threading.Thread(target=self._read_output, args=(proc,), daemon=True)
+        self.reader_thread.start()
+
+        port = int(settings["controller_port"])
+        secret = settings["api_secret"]
+        deadline = time.time() + 12
+        while time.time() < deadline:
+            if proc.poll() is not None or self.process is not proc:
+                code = proc.poll()
+                self._starting = False
+                self.stop()
+                raise CoreError(f"Mihomo 启动失败，exit code: {code}")
+            if self._controller_ready(port, secret):
+                self._starting = False
+                redact_runtime_config(cfg, sensitive_urls)
+                self.log("[CORE] Mihomo API 身份验证通过，内核就绪。")
+                return
+            time.sleep(0.2)
+
+        self._starting = False
+        code = proc.poll()
         self.stop()
-        raise CoreError(f"Mihomo did not become ready. Exit code: {code}")
+        raise CoreError(
+            f"Mihomo API 未在预期端口通过身份验证（controller={port}, exit={code}）。"
+            "端口可能被占用或内核启动失败。")
 
     def stop(self):
         self._stopping = True
+        self._starting = False
         proc, self.process = self.process, None
-        if not proc: return
+        if not proc:
+            return
         if proc.poll() is None:
             self.log("[CORE] Stopping Mihomo...")
             try:
