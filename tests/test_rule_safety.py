@@ -30,7 +30,11 @@ class RoutingTests(unittest.TestCase):
     def test_injection_never_reaches_config(self):
         for i,extra in enumerate(INJECTIONS):
             p={"id":f"evil{i}","name":"evil","domains":["safe.jp"]}
-            p.update(extra)
+            for key, values in extra.items():
+                if key == "domains":
+                    p[key] = ["safe.jp"] + list(values)
+                else:
+                    p[key] = values
             rules=self._rules(p)
             self.assertEqual([x for x in rules if x.upper().startswith("- MATCH,")],["- MATCH,DIRECT"])
             self.assertEqual(rules[-1],"- MATCH,DIRECT")
