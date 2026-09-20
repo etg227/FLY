@@ -132,6 +132,18 @@ def provider_cache_name(url: str) -> str:
     # existing provider cache. Duplicate URLs are deduplicated before config generation.
     return "sub_" + hashlib.md5(str(url).encode("utf-8")).hexdigest()[:10] + ".yaml"
 
+def _valid_provider_cache(path):
+    """A cache file only counts as fallback if it still looks like a subscription."""
+    try:
+        p = path
+        if not p.exists() or p.stat().st_size <= 0:
+            return False
+        with p.open("rb") as f:
+            blob = f.read(64 * 1024)
+        return _looks_like_subscription(blob, "", "")
+    except (OSError, ValueError):
+        return False
+
 def select_usable_subscriptions(urls, provider_dir, log=lambda m: None, timeout=8):
     clean, seen = [], set()
     for u in urls:
@@ -152,7 +164,7 @@ def select_usable_subscriptions(urls, provider_dir, log=lambda m: None, timeout=
 
     usable, failures = [], []
     for i, u in enumerate(clean, 1):
-        cached = (provider_dir / provider_cache_name(u)).exists()
+        cached = _valid_provider_cache(provider_dir / provider_cache_name(u))
         ok, reason = results.get(u, (False, "未检测"))
         if ok:
             usable.append(u)
