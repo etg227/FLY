@@ -426,7 +426,8 @@ class FlyApp:
             self._probe_now.set()
 
     def _start_watchdog(self):
-        if self._watch_stop: self._watch_stop.set()
+        if self._watch_stop:
+            self._watch_stop.set(); self._probe_now.set()
         self._watch_stop=threading.Event()
         self._probe_now.clear(); self._dial_tracker.reset()
         threading.Thread(target=self._watchdog_loop,args=(self._watch_stop,),daemon=True).start()
@@ -474,6 +475,7 @@ class FlyApp:
         self._start_token += 1        # 让还在跑的启动流程立刻作废
         if self._watch_stop:
             self._watch_stop.set(); self._watch_stop = None
+            self._probe_now.set()   # 叫醒看门狗，让它立刻看到 stop 并退出
         if self._traffic_stop:
             self._traffic_stop.set(); self._traffic_stop = None
         with self._proxy_lock:
@@ -494,6 +496,7 @@ class FlyApp:
         self._start_token += 1
         if self._watch_stop:
             self._watch_stop.set(); self._watch_stop=None
+            self._probe_now.set()   # 叫醒看门狗，让它立刻看到 stop 并退出
         if self._traffic_stop:
             self._traffic_stop.set(); self._traffic_stop=None
         self._ui(lambda:self.traffic_var.set("-"))
