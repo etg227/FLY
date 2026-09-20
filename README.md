@@ -125,34 +125,42 @@ py -3 main.py
 
 ## 加速内核
 
-FLY 使用 [mihomo](https://github.com/MetaCubeX/mihomo) 作为内核，**版本固定在 `v1.19.31`**，
-首次启动时自动下载安装。
+FLY 使用 [mihomo](https://github.com/MetaCubeX/mihomo) 作为内核，当前固定为
+**`v1.19.31 / mihomo-windows-amd64-v1-v1.19.31.zip`**。
 
-固定版本是为了让下载内容可以被校验：
+内核采用 fail-closed 的固定信任链：
 
-- release 元数据只从 `api.github.com` 直连获取，镜像提供的元数据无法自证，因此不采信；
-- 拿到官方校验基准（asset digest 或同一 release 的校验文件）后，安装包本体才允许走镜像加速，
-  下载完按 SHA-256 比对，不一致直接拒绝安装；
-- 拿不到任何校验基准时，只接受官方直连下载；
-- 启动前还会执行 `mihomo -v`，确认内核自报的版本与固定版本一致。
+- 只从官方 GitHub Release 下载这一份精确 asset，不使用第三方镜像；
+- 程序内固定该 zip 的 SHA-256：
+  `d89c9bd746e8aacff89b2edf674813e25e8bd2dc565f4e12dc3b4526dd2b3177`；
+- 下载后必须先通过固定 SHA-256，才允许解压；
+- 已验证 zip 会保留为 `core\mihomo-verified.zip`；
+- 每次真正执行 `mihomo.exe` 之前，FLY 会把当前 exe 与可信归档里的 exe 做内容校验；
+- 完整性校验本身不会先执行 `mihomo.exe`，因此未知/被替换的 exe 不会因为“验证版本”而获得执行机会；
+- 如果 exe 被杀软隔离、删除或修改，而可信归档仍正常，FLY 会直接离线恢复，不需要重新下载。
 
 ### 内核下载不了怎么办
 
-如果 `api.github.com` 不可达，FLY 不会退而求其次去镜像下载未经校验的可执行文件，
-而是提示手动安装：
+可以手动下载**精确文件**：
 
-1. 打开 <https://github.com/MetaCubeX/mihomo/releases/tag/v1.19.31>
-2. 下载 `mihomo-windows-amd64-<版本>.zip`
-3. 解压出的 exe 改名为 `mihomo.exe`，放到 FLY 目录下的 `core\mihomo.exe`
+<https://github.com/MetaCubeX/mihomo/releases/download/v1.19.31/mihomo-windows-amd64-v1-v1.19.31.zip>
 
-必须是 `v1.19.31`，其它版本会在启动校验时被拒绝。
+把该 zip 原样保存为：
+
+`core\mihomo-verified.zip`
+
+然后重新启动 FLY。FLY 会先校验固定 SHA-256，再从归档自动恢复 `mihomo.exe`。
+不要手动换成 compatible、go120/go12x、v2/v3 或其它 asset；它们即使版本号相同，字节内容也不同，
+会被固定哈希拒绝。
 
 ### 升级内核版本
 
-版本号写在两处，必须同时修改，否则 `tests/test_core_integrity.py` 会失败：
+以下固定值在源码版和冻结 launcher 中各有一份，升级时必须一起更新，
+`tests/test_core_integrity.py` 会检查一致性：
 
-- `backend/core_installer.py` 的 `CORE_VERSION`
-- `launcher.py` 的 `CORE_VERSION`（打包进 launcher.exe 的副本）
+- `CORE_VERSION`
+- `CORE_ASSET_NAME`
+- `CORE_ZIP_SHA256`
 
 ## 节点来源
 
