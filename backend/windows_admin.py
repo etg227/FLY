@@ -16,6 +16,7 @@ def relaunch_as_admin(games="", autostart=False):
             args += ["--games", str(games)]
         if autostart:
             args.append("--autostart")
+        args.append("--takeover")
         exe = sys.executable
         # list2cmdline implements Windows CommandLineToArgvW-compatible quoting;
         # custom profile IDs can no longer break the elevated command line.
