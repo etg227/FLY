@@ -216,7 +216,17 @@ def install_core(paths, log, fetch=None):
     try:
         _write_atomic(archive, blob)
     except OSError as e:
-        # 留存归档只是为了离线修复，失败不该阻断安装本身
-        log(f"[CORE] 可信归档留存失败（{e}），离线修复暂不可用。")
+        # The retained pinned archive is part of the runtime trust chain, not
+        # merely a convenience cache. If it cannot be persisted, installing a
+        # new exe would leave FLY unable to prove that executable's origin on
+        # the next verification pass. Fail closed before touching the exe.
+        raise RuntimeError(
+            "无法安全保存可信 Mihomo 归档，已拒绝安装内核；"
+            "请检查 core 目录权限/占用后重试。"
+        ) from e
+
     _write_atomic(paths.core_exe, exe_bytes)
+    final = inspect_core(paths)
+    if final.state != VALID:
+        raise RuntimeError(f"内核安装后完整性自检失败：{final.detail}")
     log(f"[CORE] {CORE_VERSION} 安装完成；归档与 exe 均已通过固定 SHA-256 校验。")
