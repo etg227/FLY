@@ -44,7 +44,7 @@ OBSOLETE = [
 ]
 
 class _LauncherMutex:
-    def __init__(self, name=r"Local\\FLY-etg227-launcher"):
+    def __init__(self, name=r"Local\FLY-etg227-launcher"):
         self.name=name; self.handle=None; self.owned=False
     def acquire(self):
         if os.name!="nt":
@@ -52,8 +52,13 @@ class _LauncherMutex:
         k=ctypes.windll.kernel32
         k.CreateMutexW.restype=ctypes.c_void_p
         h=k.CreateMutexW(None,True,self.name)
-        if not h:return False
-        if k.GetLastError()==183:
+        err=int(k.GetLastError())
+        if not h:
+            # API failure is not the same thing as "another launcher exists".
+            # In particular an invalid named-object path used to land here and
+            # was misleadingly reported as an already-running instance.
+            raise OSError(err, ctypes.FormatError(err) or "CreateMutexW failed")
+        if err==183:
             k.CloseHandle(h); return False
         self.handle=h; self.owned=True; return True
     def close(self):
@@ -534,16 +539,30 @@ class LauncherApp(tk.Tk):
 
 if __name__=="__main__":
     guard=_LauncherMutex()
-    if not guard.acquire():
+    try:
+        acquired=guard.acquire()
+    except OSError as e:
         try:
             r=tk.Tk(); r.withdraw()
             from tkinter import messagebox
-            messagebox.showinfo("FLY","FLY 启动器已经在运行，请使用现有窗口。")
+            messagebox.showerror(
+                "FLY",
+                f"FLY 启动器单实例锁初始化失败（Windows 错误 {e.errno}）。\n\n{e}"
+            )
             r.destroy()
         except Exception:
             pass
     else:
-        try:
-            LauncherApp().mainloop()
-        finally:
-            guard.close()
+        if not acquired:
+            try:
+                r=tk.Tk(); r.withdraw()
+                from tkinter import messagebox
+                messagebox.showinfo("FLY","FLY 启动器已经在运行，请使用现有窗口。")
+                r.destroy()
+            except Exception:
+                pass
+        else:
+            try:
+                LauncherApp().mainloop()
+            finally:
+                guard.close()
