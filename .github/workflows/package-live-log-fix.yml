@@ -1,0 +1,51 @@
+name: Package live log fix
+
+on:
+  push:
+    branches:
+      - fix/live-log-readonly-package
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Compile Python sources
+        shell: pwsh
+        run: python -m compileall -q main.py launcher.py backend tests
+
+      - name: Run regression tests
+        shell: pwsh
+        run: python -m unittest discover -s tests -p "test_*.py" -v
+
+      - name: Build source ZIP
+        shell: pwsh
+        run: |
+          $stage = Join-Path $env:RUNNER_TEMP "FLY-v0.9.2-live-log-fix"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          git ls-files | ForEach-Object {
+            if ($_ -eq ".github/workflows/package-live-log-fix.yml") { return }
+            $dst = Join-Path $stage $_
+            $parent = Split-Path $dst -Parent
+            if ($parent) { New-Item -ItemType Directory -Force -Path $parent | Out-Null }
+            Copy-Item $_ $dst -Force
+          }
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Compress-Archive -Path $stage -DestinationPath "dist/FLY-v0.9.2-live-log-fix.zip" -Force
+
+      - name: Upload source ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: FLY-v0.9.2-live-log-fix-source
+          path: dist/FLY-v0.9.2-live-log-fix.zip
+          if-no-files-found: error
+          retention-days: 7
