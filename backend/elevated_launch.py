@@ -168,7 +168,10 @@ def lock_launch_inputs(paths, win=None):
     # Lock the common application root and every directory component below it
     # against rename/delete. This prevents a same-user process from swapping a
     # parent directory/junction while the leaf files themselves remain locked.
-    common = Path(os.path.commonpath([str(p) for p in file_paths]))
+    try:
+        common = Path(os.path.commonpath([str(p) for p in file_paths]))
+    except ValueError as e:
+        raise ElevationError("启动文件不在同一 Windows 路径树中，已拒绝提权启动。") from e
     if common in file_paths:
         common = common.parent
     directories = []
