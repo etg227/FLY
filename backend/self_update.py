@@ -25,30 +25,55 @@ _REPLACER = (
 )
 
 def schedule_launcher_replace(root: Path, log=lambda m: None, spawn=None):
-    """Replace the frozen launcher after the currently running launcher exits.
+    """Replace launcher.exe after the currently running copy releases it.
 
-    v0.8.10's updater can copy launcher.exe.new even though it cannot overwrite
-    its own running executable. The newly updated main.py schedules this helper
-    on first launch, so launcher security fixes reach existing users without a
-    manual download.
+    Source-mode FLY can use its Python interpreter as the detached replacer.
+    Frozen standalone FLY is itself launcher.exe, so sys.executable -c would
+    merely re-enter the launcher. In that mode use the system PowerShell
+    executable with an inline retry loop and pass paths through environment
+    variables (no temp script and no command-line interpolation).
     """
     root = Path(root)
     pending = root / "launcher.exe.new"
     target = root / "launcher.exe"
     if not _IS_WINDOWS or not pending.exists():
         return False
-    if not sys.executable:
-        log("[UPDATE] 找不到当前解释器，launcher.exe 自动替换已跳过。")
-        return False
     spawn = spawn or subprocess.Popen
     try:
-        spawn([sys.executable, "-c", _REPLACER, str(pending), str(target)],
-              cwd=str(root),
-              stdin=subprocess.DEVNULL,
-              stdout=subprocess.DEVNULL,
-              stderr=subprocess.DEVNULL,
-              creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-        log("[UPDATE] 已安排 launcher.exe 在旧启动器退出后安全替换。")
+        if getattr(sys, "frozen", False):
+            ps = (
+                "$src=$env:FLY_REPLACE_SRC; $dst=$env:FLY_REPLACE_DST; "
+                "$ok=$false; "
+                "for($i=0;$i -lt 30;$i++){"
+                "try { Move-Item -LiteralPath $src -Destination $dst -Force -ErrorAction Stop; "
+                "$ok=$true; break } "
+                "catch { Start-Sleep -Seconds 1 }}; "
+                "if($ok){exit 0}else{exit 3}"
+            )
+            env = os.environ.copy()
+            env["FLY_REPLACE_SRC"] = str(pending)
+            env["FLY_REPLACE_DST"] = str(target)
+            spawn(
+                ["powershell.exe", "-NoProfile", "-NonInteractive",
+                 "-WindowStyle", "Hidden", "-Command", ps],
+                cwd=str(root),
+                env=env,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        else:
+            if not sys.executable:
+                log("[UPDATE] 找不到当前解释器，launcher.exe 自动替换已跳过。")
+                return False
+            spawn([sys.executable, "-c", _REPLACER, str(pending), str(target)],
+                  cwd=str(root),
+                  stdin=subprocess.DEVNULL,
+                  stdout=subprocess.DEVNULL,
+                  stderr=subprocess.DEVNULL,
+                  creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        log("[UPDATE] 已安排 launcher.exe 在当前程序退出后安全替换。")
         return True
     except Exception as e:
         log(f"[UPDATE] launcher.exe 自动替换安排失败：{e}")
