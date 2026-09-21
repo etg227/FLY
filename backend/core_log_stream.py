@@ -23,6 +23,9 @@ class CoreLogStream:
         self.level = level
         self.read_timeout = read_timeout
         self.reconnect_delay = reconnect_delay
+        # Controller traffic is always loopback and must not inherit either
+        # Windows' system proxy or HTTP(S)_PROXY environment variables.
+        self._opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         self._warned = False
 
     def _url(self):
@@ -34,7 +37,7 @@ class CoreLogStream:
         if self.secret:
             headers["Authorization"] = f"Bearer {self.secret}"
         req = urllib.request.Request(self._url(), headers=headers)
-        return urllib.request.urlopen(req, timeout=self.read_timeout)
+        return self._opener.open(req, timeout=self.read_timeout)
 
     def _emit(self, raw):
         raw = raw.strip()
