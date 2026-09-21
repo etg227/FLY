@@ -176,7 +176,10 @@ class FlyApp:
         )).pack(anchor="w")
 
         logf = ttk.LabelFrame(outer,text="Live log",padding=8); logf.pack(fill="both",expand=True)
-        self.logbox = tk.Text(logf,wrap="word",font=("Consolas",9),height=14); self.logbox.pack(side="left",fill="both",expand=True)
+        self.logbox = tk.Text(
+            logf, wrap="word", font=("Consolas",9), height=14, state="disabled"
+        )
+        self.logbox.pack(side="left",fill="both",expand=True)
         sb=ttk.Scrollbar(logf,orient="vertical",command=self.logbox.yview); sb.pack(side="right",fill="y"); self.logbox.configure(yscrollcommand=sb.set)
 
     def reload_profiles(self, first=False):
@@ -249,20 +252,32 @@ class FlyApp:
                 pass
 
     def flush_logs(self):
+        pending = []
         try:
             while True:
-                x=self.logs.get_nowait()
-                self.logbox.insert("end",x+"\n")
-            # unreachable
+                pending.append(self.logs.get_nowait())
         except queue.Empty:
             pass
-        try:
-            rows = int(self.logbox.index("end-1c").split(".")[0])
-            if rows > 2000:
-                self.logbox.delete("1.0", f"{rows-1800}.0")
-            self.logbox.see("end")
-        except Exception:
-            pass
+
+        if pending:
+            try:
+                # Live log is display-only. FLY temporarily unlocks the widget
+                # only while appending/trimming its own output, then locks it
+                # again so keyboard input cannot modify diagnostic text.
+                self.logbox.configure(state="normal")
+                for x in pending:
+                    self.logbox.insert("end",x+"\n")
+                rows = int(self.logbox.index("end-1c").split(".")[0])
+                if rows > 2000:
+                    self.logbox.delete("1.0", f"{rows-1800}.0")
+                self.logbox.see("end")
+            except (RuntimeError, tk.TclError):
+                pass
+            finally:
+                try:
+                    self.logbox.configure(state="disabled")
+                except (RuntimeError, tk.TclError):
+                    pass
         if not self._closing:
             self.root.after(100,self.flush_logs)
 
