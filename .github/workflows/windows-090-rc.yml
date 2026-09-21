@@ -1,0 +1,109 @@
+name: Windows 0.9.0 RC Robustness
+
+on:
+  push:
+    branches:
+      - fix/v0.8.11-comprehensive-hardening
+    paths:
+      - "tests/windows_rc_live.py"
+      - ".github/workflows/windows-090-rc.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-rc:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, windows-2025]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Confirm native Windows
+        shell: pwsh
+        run: |
+          Get-ComputerInfo | Select-Object WindowsProductName,WindowsVersion,OsBuildNumber
+          whoami
+          python -c "import os,platform; assert os.name=='nt'; print(platform.platform())"
+
+      - name: Compile and full regression
+        shell: pwsh
+        run: |
+          python -m compileall -q main.py launcher.py backend tests
+          python -m unittest discover -s tests -p "test_*.py" -v
+
+      - name: Repeat critical race suites five times
+        shell: pwsh
+        run: |
+          $patterns=@(
+            "test_robustness_fuzz.py",
+            "test_core_integrity.py",
+            "test_core_elevated_flow.py",
+            "test_core_lifecycle.py",
+            "test_core_log_stream.py",
+            "test_elevated_launch.py",
+            "test_provider_index.py",
+            "test_subscription_probe.py",
+            "test_system_proxy.py",
+            "test_selector_safety.py"
+          )
+          1..5 | ForEach-Object {
+            Write-Host "RC ROBUSTNESS PASS $_ / 5"
+            foreach($pattern in $patterns) {
+              python -m unittest discover -s tests -p $pattern -v
+              if($LASTEXITCODE -ne 0){ exit $LASTEXITCODE }
+            }
+          }
+
+      - name: Native Windows destructive + real TUN gate
+        shell: pwsh
+        env:
+          FLY_WINDOWS_RC_LIVE: "1"
+          PYTHONWARNINGS: "default"
+        run: |
+          python tests/windows_rc_live.py -v
+
+      - name: Build frozen launcher and inspect update payload
+        shell: pwsh
+        run: |
+          python -m pip install --disable-pip-version-check pyinstaller
+          python -m PyInstaller --onefile --noconsole --name launcher launcher.py
+          if(-not (Test-Path "dist\launcher.exe")){ throw "launcher.exe missing" }
+          $size=(Get-Item "dist\launcher.exe").Length
+          Write-Host "launcher.exe bytes=$size"
+          if($size -lt 5000000){ throw "launcher.exe unexpectedly small" }
+
+          $stage=Join-Path $env:RUNNER_TEMP "fly-update-rc"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          $files=@("main.py","launcher.py","README.md","LICENSE","VERSION","START_FLY_DEBUG.bat",".gitignore")
+          $dirs=@("backend","rules","scripts")
+          foreach($f in $files){ if(Test-Path $f){ Copy-Item $f (Join-Path $stage $f) } }
+          foreach($d in $dirs){ if(Test-Path $d){ Copy-Item $d (Join-Path $stage $d) -Recurse } }
+          Get-ChildItem $stage -Recurse -Directory -Filter "__pycache__" | Remove-Item -Recurse -Force
+          Copy-Item "dist\launcher.exe" (Join-Path $stage "launcher.exe.new") -Force
+          $manifest=@{
+            schema=1
+            managed_dirs=@("backend","rules","scripts")
+            managed_root=@("main.py","launcher.py","README.md","LICENSE","START_FLY_DEBUG.bat",".gitignore","update-manifest.json","launcher.exe.new")
+          } | ConvertTo-Json -Depth 4
+          Set-Content (Join-Path $stage "update-manifest.json") $manifest -Encoding utf8
+          Compress-Archive -Path (Join-Path $stage "*") -DestinationPath "dist\FLY-update-rc.zip" -Force
+
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $z=[IO.Compression.ZipFile]::OpenRead((Join-Path $PWD "dist\FLY-update-rc.zip"))
+          try{
+            $names=@($z.Entries | ForEach-Object { $_.FullName.Replace("\","/") })
+            foreach($required in @("main.py","launcher.py","launcher.exe.new","update-manifest.json")){
+              if($names -notcontains $required){ throw "missing update entry $required" }
+            }
+            foreach($bad in @("private/","runtime/","core/")){
+              if($names | Where-Object { $_.StartsWith($bad) }){ throw "protected data leaked: $bad" }
+            }
+          } finally { $z.Dispose() }
