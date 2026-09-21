@@ -27,6 +27,10 @@ WAIT_OBJECT_0 = 0x0
 WAIT_TIMEOUT = 0x102
 ERROR_CANCELLED = 1223
 STILL_ACTIVE = 259
+GENERIC_READ = 0x80000000
+FILE_SHARE_READ = 0x00000001
+OPEN_EXISTING = 3
+FILE_ATTRIBUTE_NORMAL = 0x00000080
 
 class ElevationError(RuntimeError):
     """提权启动失败（环境不支持 / API 失败）。"""
@@ -92,7 +96,84 @@ def _real_backend():
         def close(self, handle):
             kernel32.CloseHandle(handle)
 
+        def open_read_lock(self, path):
+            # FILE_SHARE_READ only: other readers/process creation are allowed,
+            # but WRITE and DELETE opens are denied for the lifetime of this
+            # handle. This closes the verify -> runas path-replacement window.
+            kernel32.CreateFileW.argtypes = [
+                wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+                ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD,
+                wintypes.HANDLE,
+            ]
+            kernel32.CreateFileW.restype = wintypes.HANDLE
+            handle = kernel32.CreateFileW(
+                str(path), GENERIC_READ, FILE_SHARE_READ, None,
+                OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, None,
+            )
+            invalid = ctypes.c_void_p(-1).value
+            value = ctypes.cast(handle, ctypes.c_void_p).value if handle else None
+            if not handle or value == invalid:
+                return None, ctypes.get_last_error() or kernel32.GetLastError()
+            return handle, 0
+
     return Win()
+
+class LockedLaunchInputs:
+    """Hold read handles that deny write/delete until elevated startup is trusted."""
+
+    def __init__(self, handles, win):
+        self._handles = list(handles)
+        self._win = win
+        self._closed = False
+
+    def close(self):
+        if self._closed:
+            return
+        self._closed = True
+        for handle in reversed(self._handles):
+            try:
+                self._win.close(handle)
+            except Exception:
+                pass
+        self._handles.clear()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.close()
+
+
+def lock_launch_inputs(paths, win=None):
+    """Lock executable/config against replacement while verify + runas happen.
+
+    The lock deliberately permits reads so mihomo config validation and the
+    elevated child can open the files. Any pre-existing writer causes
+    acquisition to fail closed; once acquired, new WRITE/DELETE opens and
+    os.replace/unlink attempts are denied until close().
+    """
+    if win is None:
+        if os.name != "nt":
+            raise ElevationError("启动输入锁仅在 Windows 上可用。")
+        win = _real_backend()
+    handles = []
+    try:
+        for path in paths:
+            handle, err = win.open_read_lock(str(path))
+            if not handle:
+                raise ElevationError(
+                    f"无法锁定启动文件 {path}（错误码 {err}）；"
+                    "文件可能正被其他程序修改。")
+            handles.append(handle)
+        return LockedLaunchInputs(handles, win)
+    except Exception:
+        for handle in reversed(handles):
+            try:
+                win.close(handle)
+            except Exception:
+                pass
+        raise
+
 
 class ElevatedProcess:
     """把提权进程句柄包装成 Popen 风格的最小接口（无 stdout）。"""
