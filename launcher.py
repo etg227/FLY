@@ -5,7 +5,7 @@ core/ and runtime/ are user/runtime state and are never replaced by an app
 update.
 """
 from __future__ import annotations
-import ctypes, hashlib, io, json, os, queue, re, shutil, subprocess, sys, tempfile, threading, urllib.request, webbrowser, zipfile
+import ctypes, hashlib, io, json, os, queue, re, shutil, subprocess, sys, tempfile, threading, time, urllib.request, webbrowser, zipfile
 from pathlib import Path, PurePosixPath
 import tkinter as tk
 from tkinter import ttk
