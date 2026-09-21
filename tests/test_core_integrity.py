@@ -72,6 +72,24 @@ class InstallerTests(unittest.TestCase):
                 ci.install_core(self.paths,self.logs.append,fetch=ff)
         self.assertEqual(self.paths.core_exe.read_bytes(),b"MZ-old")
 
+    def test_archive_persist_failure_aborts_before_replacing_exe(self):
+        self.paths.core_exe.parent.mkdir(parents=True, exist_ok=True)
+        self.paths.core_exe.write_bytes(b"MZ-old")
+        real_write = ci._write_atomic
+
+        def fail_archive(target, data):
+            if Path(target) == self._archive():
+                raise PermissionError("archive locked")
+            return real_write(target, data)
+
+        with mock.patch.object(ci, "CORE_ZIP_SHA256", FAKE_SHA), \
+             mock.patch.object(ci, "_write_atomic", side_effect=fail_archive):
+            with self.assertRaises(RuntimeError):
+                ci.install_core(self.paths, self.logs.append, fetch=FakeFetch())
+
+        self.assertEqual(self.paths.core_exe.read_bytes(), b"MZ-old")
+        self.assertFalse(any("安装完成" in x for x in self.logs))
+
     def test_valid_local_archive_repairs_exe_without_network(self):
         self._archive().parent.mkdir(parents=True,exist_ok=True)
         self._archive().write_bytes(FAKE_ZIP)
