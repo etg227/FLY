@@ -15,6 +15,14 @@ class PrivacyTests(unittest.TestCase):
         self.assertNotIn("35.72.161.13",safe)
         self.assertIn("<host:",safe)
 
+    def test_persisted_log_redacts_ipv6_node_addresses(self):
+        line=("dial tcp [2001:db8:1234::5]:443 failed; "
+              "fallback 2404:6800:4008::200e")
+        safe=redact_log_line(line)
+        self.assertNotIn("2001:db8:1234::5",safe)
+        self.assertNotIn("2404:6800:4008::200e",safe)
+        self.assertIn("<ip6:",safe)
+
     def test_runtime_config_subscription_and_api_secret_are_redacted(self):
         p=Path(tempfile.mkdtemp())/"config.yaml"
         url="https://airport.example/sub?token=SECRET"
