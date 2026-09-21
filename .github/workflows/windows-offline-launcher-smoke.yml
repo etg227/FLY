@@ -1,0 +1,108 @@
+name: Windows Offline Standalone Launcher Smoke
+
+on:
+  push:
+    branches:
+      - hotfix/v0.9.2-offline-bootstrap
+    paths:
+      - ".github/workflows/windows-offline-launcher-smoke.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  offline-first-run:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, windows-2025]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build release-equivalent standalone launcher
+        shell: pwsh
+        run: |
+          python -m pip install --disable-pip-version-check pyinstaller
+          python scripts/build_launcher.py
+          $size=(Get-Item "dist\launcher.exe").Length
+          Write-Host "standalone launcher bytes=$size"
+          if($size -lt 20000000){ throw "launcher is too small to contain offline bootstrap" }
+
+      - name: Empty-folder first run with launcher network blocked
+        shell: pwsh
+        run: |
+          $ErrorActionPreference="Stop"
+          $dir=Join-Path $env:RUNNER_TEMP "fly-offline-first-run"
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          $exe=Join-Path $dir "launcher.exe"
+          Copy-Item "dist\launcher.exe" $exe -Force
+
+          $rule="FLY-offline-smoke-${{ matrix.os }}-$env:GITHUB_RUN_ID"
+          $oldPath=$env:PATH
+          try {
+            New-NetFirewallRule -DisplayName $rule -Direction Outbound -Program $exe -Action Block -Profile Any | Out-Null
+
+            $env:PATH="$env:SystemRoot\System32;$env:SystemRoot;$env:SystemRoot\System32\WindowsPowerShell\v1.0"
+            $p=Start-Process $exe -WorkingDirectory $dir -PassThru
+            Write-Host "bootstrap pid=$($p.Id)"
+
+            $deadline=(Get-Date).AddSeconds(25)
+            $log=Join-Path $dir "runtime\fly.log"
+            while((Get-Date) -lt $deadline){
+              $ready=(Test-Path (Join-Path $dir "main.py")) -and
+                     (Test-Path (Join-Path $dir "backend\config.py")) -and
+                     (Test-Path (Join-Path $dir "VERSION")) -and
+                     (Test-Path (Join-Path $dir "core\mihomo-verified.zip")) -and
+                     (Test-Path (Join-Path $dir "core\mihomo.exe")) -and
+                     (Test-Path $log)
+              if($ready){
+                $txt=Get-Content $log -Raw -ErrorAction SilentlyContinue
+                if($txt -match "会话开始"){ break }
+              }
+              Start-Sleep -Milliseconds 250
+            }
+
+            foreach($required in @(
+              "main.py","VERSION","backend\config.py","rules",
+              "core\mihomo-verified.zip","core\mihomo.exe","runtime\fly.log"
+            )){
+              $full=Join-Path $dir $required
+              if(-not (Test-Path $full)){ throw "offline bootstrap missing $required" }
+            }
+
+            $archive=Join-Path $dir "core\mihomo-verified.zip"
+            $hash=(Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+            if($hash -ne "d89c9bd746e8aacff89b2edf674813e25e8bd2dc565f4e12dc3b4526dd2b3177"){
+              throw "embedded Mihomo trust anchor hash mismatch: $hash"
+            }
+
+            $txt=Get-Content $log -Raw
+            if($txt -notmatch "会话开始"){ throw "FLY main session never started offline" }
+
+            $procs=Get-CimInstance Win32_Process
+            $embedded=@($procs | Where-Object {
+              $_.ExecutablePath -eq $exe -and $_.CommandLine -match "--run-main"
+            })
+            if($embedded.Count -lt 1){ throw "main.py was not running through embedded launcher runtime" }
+            Write-Host "embedded-main processes=$($embedded.Count)"
+
+            $external=@($procs | Where-Object {
+              $_.Name -match "^pythonw?\.exe$" -and $_.CommandLine -like "*$dir*main.py*"
+            })
+            if($external.Count -ne 0){ throw "external Python was used for first run" }
+
+            Write-Host "OFFLINE FIRST RUN OK on ${{ matrix.os }}"
+          }
+          finally {
+            $env:PATH=$oldPath
+            Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+              Where-Object { $_.ExecutablePath -eq $exe } |
+              ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+            Remove-NetFirewallRule -DisplayName $rule -ErrorAction SilentlyContinue
+          }
