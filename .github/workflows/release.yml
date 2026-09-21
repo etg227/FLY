@@ -41,6 +41,9 @@ jobs:
             "test_core_log_stream.py",
             "test_core_ownership.py",
             "test_elevated_launch.py",
+            "test_launcher_mutex.py",
+            "test_launcher_bootstrap.py",
+            "test_self_update.py",
             "test_provider_index.py",
             "test_subscription_probe.py",
             "test_system_proxy.py",
@@ -54,11 +57,11 @@ jobs:
             }
           }
 
-      - name: Build launcher.exe
+      - name: Build standalone launcher.exe
         shell: pwsh
         run: |
           python -m pip install --upgrade pip pyinstaller
-          python -m PyInstaller --onefile --noconsole --name launcher launcher.py
+          python scripts/build_launcher.py
 
       - name: Build verified update payload
         id: pack
@@ -104,4 +107,4 @@ jobs:
             Write-Host "$tag already exists; skipping duplicate release."
             exit 0
           }
-          gh release create $tag "dist\launcher.exe#launcher.exe" "dist\FLY-update.zip#FLY-update.zip" "dist\FLY-update.zip.sha256#FLY-update.zip.sha256" --target "$env:GITHUB_SHA" --title "FLY $tag" --notes "FLY $tag introduces the hardened Windows acceleration architecture: only the pinned Mihomo core is elevated for TUN, verified exe/config paths are locked through runas and API readiness, core/process resources are closed deterministically, failover and proxy recovery are fail-safe, and updater/config/subscription handling is hardened. The release is validated by Windows regression and repeated robustness tests before packaging."
+          gh release create $tag "dist\launcher.exe#launcher.exe" "dist\FLY-update.zip#FLY-update.zip" "dist\FLY-update.zip.sha256#FLY-update.zip.sha256" --target "$env:GITHUB_SHA" --title "FLY $tag" --notes "FLY $tag includes the hardened Windows acceleration architecture plus a true standalone launcher: first run can restore the app and pinned Mihomo core from launcher.exe itself, reuses the embedded Python runtime, and does not require GitHub or a preinstalled Python before opening FLY. Windows regression and repeated robustness tests run before packaging."
