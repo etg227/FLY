@@ -75,6 +75,69 @@ def app_dir() -> Path:
         return Path(sys.executable).resolve().parent
     return Path(__file__).resolve().parent
 
+def _embedded_bootstrap_dir() -> Path | None:
+    """Return the PyInstaller-bundled bootstrap payload, if present."""
+    base = getattr(sys, "_MEIPASS", None)
+    if not base:
+        return None
+    payload = Path(base) / "bootstrap"
+    if not (payload / "main.py").exists() or not (payload / "VERSION").exists():
+        return None
+    return payload
+
+def _seed_embedded_core(root: Path, payload: Path, ui=None) -> bool:
+    """Install the pinned trusted core archive from the frozen launcher."""
+    bundled = payload / "core" / CORE_ARCHIVE_FILENAME
+    if not bundled.exists():
+        return False
+    blob = bundled.read_bytes()
+    # Validate the embedded archive with the same hard-coded trust anchor used
+    # for network downloads. A corrupt/modified bundle fails closed.
+    _trusted_core_payload(blob)
+    archive = root / "core" / CORE_ARCHIVE_FILENAME
+    try:
+        if archive.exists() and hashlib.sha256(archive.read_bytes()).hexdigest().lower() == CORE_ZIP_SHA256:
+            return False
+    except OSError:
+        pass
+    _atomic_bytes(archive, blob)
+    if ui:
+        ui.log(f"已从 launcher.exe 内置可信包准备 Mihomo {CORE_VERSION}。")
+    return True
+
+def seed_embedded_bootstrap(root: Path, ui=None) -> bool:
+    """Restore a runnable local app from the standalone launcher.
+
+    This runs before any network access.  A release launcher downloaded into a
+    brand-new empty directory can therefore start even if GitHub is blocked.
+    """
+    payload = _embedded_bootstrap_dir()
+    if payload is None:
+        return False
+
+    seeded = False
+    essential_missing = (
+        not (root / "main.py").exists()
+        or not (root / "VERSION").exists()
+        or not (root / "backend" / "config.py").exists()
+    )
+    if essential_missing:
+        if ui:
+            ui.status("正在从启动器内置包准备 FLY...")
+        _transactional_install(payload, root, ui or _NullUi())
+        seeded = True
+        if ui:
+            ui.log(f"本地程序文件已从 launcher.exe 内置包恢复为 v{local_version(root)}。")
+
+    if _seed_embedded_core(root, payload, ui):
+        seeded = True
+    return seeded
+
+class _NullUi:
+    def log(self, _msg): pass
+    def status(self, _msg): pass
+    def progress(self, _frac): pass
+
 def _opener():
     # Bootstrap/control traffic must never inherit FLY's Windows system proxy.
     return urllib.request.build_opener(urllib.request.ProxyHandler({}))
@@ -447,21 +510,45 @@ def ensure_core(root: Path, ui):
 def run_flow(root: Path, ui):
     (root/"runtime").mkdir(parents=True, exist_ok=True)
     recover_interrupted_update(root, ui)
-    ui.status("正在检查 GitHub Release 更新...")
-    cur=local_version(root)
-    try:
-        remote,assets=latest_release(ui)
-        if remote and _version_tuple(remote) > _version_tuple(cur):
-            ui.status(f"发现已验证的新版本 {remote}，正在更新...")
-            apply_release_update(root,assets,ui)
-            ui.log(f"已更新：{cur} → {remote}")
-        elif remote:
-            ui.log(f"已是最新版本（{cur}）。")
-    except Exception as e:
-        ui.log(f"更新已安全跳过：{e}")
+
+    # Seed before touching the network.  On a true first run the frozen
+    # launcher already contains the same-version app + pinned core, so there is
+    # nothing useful to fetch before we can start.
+    seeded = seed_embedded_bootstrap(root, ui)
+
+    if not seeded:
+        ui.status("正在检查 GitHub Release 更新...")
+        cur=local_version(root)
+        try:
+            remote,assets=latest_release(ui)
+            if remote and _version_tuple(remote) > _version_tuple(cur):
+                ui.status(f"发现已验证的新版本 {remote}，正在更新...")
+                apply_release_update(root,assets,ui)
+                ui.log(f"已更新：{cur} → {remote}")
+            elif remote:
+                ui.log(f"已是最新版本（{cur}）。")
+        except Exception as e:
+            ui.log(f"更新已安全跳过：{e}")
+    else:
+        ui.log("首次/修复启动使用 launcher.exe 内置版本；本次不依赖 GitHub，更新检查将在下次启动进行。")
 
     if not (root/"main.py").exists():
-        raise RuntimeError("缺少程序文件 main.py，首次运行需要访问 GitHub Release。")
+        raise RuntimeError(
+            "缺少程序文件 main.py，且当前 launcher.exe 不含可用的离线启动包。"
+            "请重新下载官方最新 launcher.exe。"
+        )
+
+    # Frozen releases already carry a CPython runtime through PyInstaller.
+    # Re-exec the same signed/trusted launcher in a dedicated --run-main mode
+    # instead of installing a second Python just to execute main.py.
+    if getattr(sys, "frozen", False):
+        try:
+            ensure_core(root,ui)
+        except Exception as e:
+            ui.log(f"内核准备未完成（{e}）。")
+            raise
+        return [sys.executable, "--run-main", str(root)]
+
     ui.status("检查运行环境...")
     ui.progress(None)
     py=find_python()
@@ -474,12 +561,25 @@ def run_flow(root: Path, ui):
         ensure_core(root,ui)
     except Exception as e:
         ui.log(f"内核下载未完成（{e}），主程序会自动重试。")
-    return py
+    return py + [str(root/"main.py")]
 
-def launch(root: Path, python_cmd):
-    cmd,ok=windowless(python_cmd)
-    flags=0 if ok else getattr(subprocess,"CREATE_NO_WINDOW",0)
-    subprocess.Popen(cmd+[str(root/"main.py")],cwd=str(root),creationflags=flags)
+def launch(root: Path, command):
+    subprocess.Popen(
+        list(command), cwd=str(root),
+        creationflags=getattr(subprocess,"CREATE_NO_WINDOW",0)
+    )
+
+def _run_embedded_main(root_arg: str) -> int:
+    """Run extracted main.py with the PyInstaller-embedded CPython runtime."""
+    import runpy
+    root = Path(root_arg).resolve()
+    main_py = root / "main.py"
+    if not main_py.exists():
+        raise RuntimeError(f"embedded main mode cannot find {main_py}")
+    os.chdir(root)
+    sys.path.insert(0, str(root))
+    runpy.run_path(str(main_py), run_name="__main__")
+    return 0
 
 class LauncherApp(tk.Tk):
     def __init__(self):
@@ -503,9 +603,9 @@ class LauncherApp(tk.Tk):
     def worker(self):
         root=app_dir()
         try:
-            py=run_flow(root,self)
+            command=run_flow(root,self)
             self.status("启动 FLY...")
-            launch(root,py)
+            launch(root,command)
             self.q.put(("done",None))
         except Exception as e:
             self.q.put(("error",str(e)))
@@ -538,6 +638,9 @@ class LauncherApp(tk.Tk):
         self.logbox.configure(state="disabled")
 
 if __name__=="__main__":
+    if len(sys.argv) >= 3 and sys.argv[1] == "--run-main":
+        raise SystemExit(_run_embedded_main(sys.argv[2]))
+
     guard=_LauncherMutex()
     try:
         acquired=guard.acquire()
