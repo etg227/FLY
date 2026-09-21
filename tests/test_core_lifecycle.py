@@ -6,9 +6,17 @@ from backend.config import Paths
 from backend.core_manager import CoreManager
 
 
+class FakeStdout:
+    def __init__(self, lines=()):
+        self._it = iter(lines)
+        self.closed = False
+    def __iter__(self): return self
+    def __next__(self): return next(self._it)
+    def close(self): self.closed = True
+
 class FakeProc:
     def __init__(self, lines=(), code=1):
-        self.stdout = iter(lines)
+        self.stdout = FakeStdout(lines)
         self._code = code
 
     def wait(self, timeout=None):
@@ -57,6 +65,19 @@ class CoreExitTests(unittest.TestCase):
         self.cm._stopping = False
         self.cm._read_output(proc)        # 不应抛出
         self.assertTrue(any("exit handler failed" in x for x in self.logs))
+
+    def test_reader_closes_stdout_after_exit(self):
+        proc = FakeProc(["line"], 0)
+        self.cm.process = proc
+        self.cm._stopping = True
+        self.cm._read_output(proc)
+        self.assertTrue(proc.stdout.closed)
+
+    def test_stop_closes_stdout_without_reader(self):
+        proc = FakeProc([], 0)
+        self.cm.process = proc
+        self.cm.stop()
+        self.assertTrue(proc.stdout.closed)
 
 
 if __name__ == "__main__":
