@@ -128,6 +128,18 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual((self.td/"VERSION").read_text(),"0.8.10")
         self.assertFalse(txn.exists())
 
+    def test_replace_retry_retries_transient_permission_error(self):
+        calls = {"n": 0}
+        def flaky_replace(src, dst):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise PermissionError("temporary AV lock")
+        with mock.patch.object(launcher.os, "replace", side_effect=flaky_replace), \
+             mock.patch.object(launcher.time, "sleep") as sleep:
+            launcher._replace_retry("src", "dst", attempts=2)
+        self.assertEqual(calls["n"], 2)
+        sleep.assert_called_once()
+
     def test_recovery_rolls_back_interrupted_transaction(self):
         (self.td/"backend").mkdir()
         (self.td/"backend"/"new.py").write_text("bad partial",encoding="utf-8")
