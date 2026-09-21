@@ -46,6 +46,11 @@ jobs:
           $patterns = @(
             "test_robustness_fuzz.py",
             "test_core_integrity.py",
+            "test_core_elevated_flow.py",
+            "test_core_lifecycle.py",
+            "test_core_log_stream.py",
+            "test_core_ownership.py",
+            "test_elevated_launch.py",
             "test_provider_index.py",
             "test_subscription_probe.py",
             "test_system_proxy.py",
