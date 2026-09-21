@@ -249,8 +249,11 @@ def build_runtime_config(paths: Paths, profile_ids, log=None, with_digest=False)
 
     cfg = home / "config.yaml"
     config_text = "\n".join(lines)
-    config_digest = hashlib.sha256(config_text.encode("utf-8")).hexdigest()
-    cfg.write_text(config_text, encoding="utf-8")
+    config_bytes = config_text.encode("utf-8")
+    config_digest = hashlib.sha256(config_bytes).hexdigest()
+    # Write exact bytes instead of text mode so Windows cannot translate LF
+    # to CRLF between the in-memory digest and the locked launch file.
+    cfg.write_bytes(config_bytes)
     if with_digest:
         return home, cfg, sensitive_urls, config_digest
     return home, cfg, sensitive_urls
@@ -271,6 +274,6 @@ def redact_runtime_config(cfg: Path, sensitive_urls):
             "secret: '<redacted-api-secret>'",
             text,
         )
-        Path(cfg).write_text(text, encoding="utf-8")
+        Path(cfg).write_text(text, encoding="utf-8", newline="\n")
     except OSError:
         pass
