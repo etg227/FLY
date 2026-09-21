@@ -1,5 +1,6 @@
 """API 日志流：提权内核唯一的日志通道，故障切换信号依赖它。"""
 import json, threading, time, unittest
+from unittest import mock
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from backend.core_log_stream import CoreLogStream, start_stream
@@ -61,6 +62,15 @@ class LogStreamTests(unittest.TestCase):
         self._run()
         self.assertIn(dial, self.payloads)                     # 喂给 DialFailureTracker 的原文
         self.assertTrue(any(dial in x for x in self.logs))     # 用户可见日志
+
+    def test_loopback_stream_does_not_use_global_urlopen_proxy_path(self):
+        StreamHandler.lines = [{"type": "info", "payload": "direct-loopback"}]
+        with mock.patch(
+            "backend.core_log_stream.urllib.request.urlopen",
+            side_effect=AssertionError("global urlopen must not be used"),
+        ):
+            self._run()
+        self.assertIn("direct-loopback", self.payloads)
 
     def test_auth_header_is_sent(self):
         StreamHandler.lines = [{"type": "info", "payload": "x"}]
