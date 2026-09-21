@@ -36,11 +36,16 @@ class LogStreamTests(unittest.TestCase):
         StreamHandler.seen_headers = []
         self.srv = ThreadingHTTPServer(("127.0.0.1", 0), StreamHandler)
         self.port = self.srv.server_address[1]
-        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+        self.server_thread = threading.Thread(
+            target=self.srv.serve_forever, daemon=True, name="test-core-log-http")
+        self.server_thread.start()
         self.payloads, self.logs = [], []
 
     def tearDown(self):
         self.srv.shutdown()
+        self.srv.server_close()
+        self.server_thread.join(timeout=2)
+        self.assertFalse(self.server_thread.is_alive())
 
     def _run(self, alive=lambda: True, wait=0.6):
         stop, t = start_stream(self.port, SECRET, self.payloads.append,
