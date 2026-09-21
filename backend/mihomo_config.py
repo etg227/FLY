@@ -1,5 +1,5 @@
 from pathlib import Path
-import re
+import hashlib, re
 from .config import (Paths, _clean_rule_values, copy_local_provider, load_app_settings,
                      load_node_source, load_profile_rules, profile_has_effect)
 from .subscription import provider_cache_name, select_usable_subscriptions
@@ -50,7 +50,7 @@ def _safe_processes(values, log):
         log(f"[RULE] 进程名 {value!r} 含不安全字符，已忽略。")
     return ok
 
-def build_runtime_config(paths: Paths, profile_ids, log=None):
+def build_runtime_config(paths: Paths, profile_ids, log=None, with_digest=False):
     """Build one Mihomo instance for any number of routing profiles.
 
     Safety invariants:
@@ -248,7 +248,11 @@ def build_runtime_config(paths: Paths, profile_ids, log=None):
         )
 
     cfg = home / "config.yaml"
-    cfg.write_text("\n".join(lines), encoding="utf-8")
+    config_text = "\n".join(lines)
+    config_digest = hashlib.sha256(config_text.encode("utf-8")).hexdigest()
+    cfg.write_text(config_text, encoding="utf-8")
+    if with_digest:
+        return home, cfg, sensitive_urls, config_digest
     return home, cfg, sensitive_urls
 
 def redact_runtime_config(cfg: Path, sensitive_urls):
