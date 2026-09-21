@@ -1,9 +1,10 @@
 """只提权 mihomo 本体的启动器：Popen 风格语义必须精确，这是停止内核的唯一通道。"""
-import subprocess, unittest
+import subprocess, tempfile, unittest
+from pathlib import Path
 
 from backend.elevated_launch import (ERROR_CANCELLED, STILL_ACTIVE, WAIT_OBJECT_0,
                                      WAIT_TIMEOUT, ElevatedProcess, ElevationCancelled,
-                                     ElevationError, launch_elevated)
+                                     ElevationError, launch_elevated, lock_launch_inputs)
 
 
 class FakeWin:
@@ -34,7 +35,13 @@ class FakeWin:
         return False
 
     def pid(self, handle): return 4321
-    def close(self, handle): self.calls.append(("close",))
+    def close(self, handle): self.calls.append(("close", handle))
+    def open_read_lock(self, path, directory=False):
+        self.calls.append(("lock", str(path), bool(directory)))
+        count = len([x for x in self.calls if x[0] == "lock"])
+        if getattr(self, "fail_lock_after", None) is not None and count > self.fail_lock_after:
+            return None, 32
+        return 1000 + count, 0
 
 
 class LaunchTests(unittest.TestCase):
@@ -60,6 +67,34 @@ class LaunchTests(unittest.TestCase):
         if el.os.name != "nt":
             with self.assertRaises(ElevationError):
                 launch_elevated("x.exe", [], None)
+
+
+
+class LaunchInputLockTests(unittest.TestCase):
+    def test_locks_parent_directories_and_leaf_files(self):
+        root=Path(tempfile.mkdtemp())
+        exe=root/"core"/"mihomo.exe"
+        cfg=root/"runtime"/"mihomo"/"config.yaml"
+        exe.parent.mkdir(parents=True); cfg.parent.mkdir(parents=True)
+        exe.write_bytes(b"MZ"); cfg.write_text("x",encoding="utf-8")
+        win=FakeWin()
+        guard=lock_launch_inputs([exe,cfg],win=win)
+        locks=[x for x in win.calls if x[0]=="lock"]
+        self.assertTrue(any(x[1]==str(root.resolve()) and x[2] for x in locks))
+        self.assertTrue(any(x[1]==str(exe.resolve()) and not x[2] for x in locks))
+        self.assertTrue(any(x[1]==str(cfg.resolve()) and not x[2] for x in locks))
+        guard.close(); guard.close()
+        self.assertEqual(len([x for x in win.calls if x[0]=="close"]),len(locks))
+
+    def test_partial_lock_failure_releases_every_acquired_handle(self):
+        root=Path(tempfile.mkdtemp())
+        exe=root/"core"/"mihomo.exe"; cfg=root/"runtime"/"config.yaml"
+        exe.parent.mkdir(parents=True); cfg.parent.mkdir(parents=True)
+        exe.write_bytes(b"MZ"); cfg.write_text("x",encoding="utf-8")
+        win=FakeWin(); win.fail_lock_after=2
+        with self.assertRaises(ElevationError):
+            lock_launch_inputs([exe,cfg],win=win)
+        self.assertEqual(len([x for x in win.calls if x[0]=="close"]),2)
 
 
 class ProcessSemanticsTests(unittest.TestCase):
@@ -99,7 +134,8 @@ class ProcessSemanticsTests(unittest.TestCase):
         self.assertEqual(p.poll(), 0)
         p.close(); p.close()
         self.assertEqual(p.poll(), 0)
-        self.assertEqual([c for c in win.calls if c == ("close",)], [("close",)])
+        closes=[x for x in win.calls if x[0]=="close"]
+        self.assertEqual(len(closes),1)
 
 
 if __name__ == "__main__":
