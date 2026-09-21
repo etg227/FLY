@@ -1,5 +1,5 @@
 from __future__ import annotations
-import ctypes, json, os, socket, subprocess, threading, time, urllib.error, urllib.request
+import ctypes, hashlib, json, os, socket, subprocess, threading, time, urllib.error, urllib.request
 from pathlib import Path
 from .config import Paths, load_app_settings
 from .core_installer import (
@@ -8,7 +8,8 @@ from .core_installer import (
 )
 from .mihomo_config import build_runtime_config, redact_runtime_config
 from .core_log_stream import start_stream
-from .elevated_launch import ElevationCancelled, ElevationError, launch_elevated
+from .elevated_launch import (ElevationCancelled, ElevationError, launch_elevated,
+                              lock_launch_inputs)
 
 class CoreError(RuntimeError): pass
 
@@ -218,6 +219,15 @@ class CoreManager:
             pass
         self._notify_exit(proc)
 
+    @staticmethod
+    def _close_stdout(proc):
+        stream = getattr(proc, "stdout", None)
+        if stream is not None:
+            try:
+                stream.close()
+            except Exception:
+                pass
+
     def _read_output(self, proc):
         try:
             if proc.stdout:
@@ -230,8 +240,10 @@ class CoreManager:
                         try: self.on_line(line)
                         except Exception: pass
         except Exception as e:
-            self.log(f"[CORE] log reader stopped: {e}")
+            if not self._stopping:
+                self.log(f"[CORE] log reader stopped: {e}")
         finally:
+            self._close_stdout(proc)
             self._notify_exit(proc)
 
     def _notify_exit(self, proc):
@@ -243,6 +255,9 @@ class CoreManager:
         try: code = proc.wait(timeout=2)
         except Exception: code = proc.poll()
         self.process = None
+        if hasattr(proc, "close"):
+            try: proc.close()
+            except Exception: pass
         if self._starting:
             self.log(f"[CORE] 内核在启动阶段退出（exit code: {code}）。")
             return
@@ -251,12 +266,13 @@ class CoreManager:
             try: self.on_exit(code)
             except Exception as e: self.log(f"[CORE] exit handler failed: {e}")
 
-    def validate(self, home, cfg):
-        if not self.verify_binary():
-            raise CoreError("Mihomo 内核文件无效或损坏，请删除 core\\mihomo.exe 后重新下载。")
+    def validate(self, home, cfg, force_verify=False):
+        result = self.verify_binary_status(force=force_verify)
+        if result.state != VALID:
+            raise CoreError("Mihomo 内核文件无效或损坏，请重新安装固定版本内核。")
         self.log("[CORE] 正在验证生成的配置...")
         try:
-            result = subprocess.run(
+            checked = subprocess.run(
                 [str(self.paths.core_exe), "-t", "-d", str(home), "-f", str(cfg)],
                 cwd=str(self.paths.app),
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -265,11 +281,11 @@ class CoreManager:
             )
         except subprocess.TimeoutExpired as e:
             raise CoreError("Mihomo 配置验证超时。") from e
-        output = (result.stdout or "").strip()
+        output = (checked.stdout or "").strip()
         if output:
             for line in output.splitlines():
                 self.log("[CHECK] " + line)
-        if result.returncode != 0:
+        if checked.returncode != 0:
             detail = "\n".join(output.splitlines()[-8:]) if output else "无详细输出"
             raise CoreError("Mihomo 拒绝生成的配置：\n" + detail)
 
@@ -294,14 +310,21 @@ class CoreManager:
         except Exception:
             return False
 
-    def start(self, game_ids, elevate=False):
-        """启动内核。elevate=True 时只提权 mihomo 本体（FLY 保持普通权限）。
+    @staticmethod
+    def _sha256_path(path):
+        h = hashlib.sha256()
+        with Path(path).open("rb") as f:
+            for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                h.update(chunk)
+        return h.hexdigest()
 
-        提权路径与普通路径的差异全部收在这里：
-        - 启动方式：ShellExecuteEx(runas) 代替 Popen；
-        - 日志通道：API /logs 流代替 stdout 管道；
-        - 退出感知：句柄等待线程代替读管道到 EOF。
-        其余（配置生成/校验、端口预检、API 就绪判定、stop 语义）完全一致。
+    def start(self, game_ids, elevate=False):
+        """Start Mihomo; elevated TUN launches only the verified core binary.
+
+        Elevated startup holds Windows read locks on the executable, generated
+        config and their path directories from the final verification through
+        controller authentication. A same-user process can therefore only make
+        startup fail; it cannot swap the verified inputs before runas.
         """
         self.stop()
         self.log("[CORE] 检查残留进程...")
@@ -310,71 +333,115 @@ class CoreManager:
         self._preflight_ports(settings)
 
         self.log("[CORE] 生成运行配置...")
-        home, cfg, sensitive_urls = build_runtime_config(self.paths, game_ids, log=self.log)
-        self.validate(home, cfg)
+        home, cfg, sensitive_urls, expected_cfg_hash = build_runtime_config(
+            self.paths, game_ids, log=self.log, with_digest=True)
 
-        with self._cleanup_lock:
-            # Recheck immediately before Popen to narrow the TOCTOU window.
-            self._preflight_ports(settings)
-            self._stopping = False
-            self._starting = True
-            args = ["-d", str(home), "-f", str(cfg)]
+        launch_guard = None
+        ready = False
+        try:
             if elevate:
-                self.log("[CORE] TUN 需要管理员权限：即将弹出 UAC，对象是已验证的 mihomo.exe 本体。")
                 try:
-                    self.process = launch_elevated(self.paths.core_exe, args,
-                                                   cwd=str(self.paths.app))
-                except ElevationCancelled as e:
-                    self._starting = False
-                    raise CoreError("已在 UAC 提示中取消授权；TUN 配置需要管理员权限才能启动内核。") from e
+                    launch_guard = lock_launch_inputs([self.paths.core_exe, cfg])
                 except ElevationError as e:
-                    self._starting = False
                     raise CoreError(
-                        f"提权启动内核失败（{e}）。也可以手动以管理员身份运行 FLY 后重试。") from e
-            else:
-                self.process = subprocess.Popen(
-                    [str(self.paths.core_exe)] + args,
-                    cwd=str(self.paths.app),
-                    stdin=subprocess.DEVNULL,
-                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                    text=True, encoding="utf-8", errors="replace",
-                    creationflags=self._flags()
-                )
-        proc = self.process
-        self._assign_job(proc)
-        port = int(settings["controller_port"])
-        secret = settings["api_secret"]
-        if proc.stdout is not None:
-            self.reader_thread = threading.Thread(target=self._read_output, args=(proc,), daemon=True)
-            self.reader_thread.start()
-        else:
-            # 提权进程没有 stdout：日志走 API /logs 流，退出感知走句柄等待
-            self._stream_stop, _ = start_stream(
-                port, secret,
-                on_line=self._on_line_safe, log=self.log,
-                alive=lambda p=proc: p.poll() is None and not self._stopping)
-            self.reader_thread = threading.Thread(target=self._watch_exit, args=(proc,), daemon=True)
-            self.reader_thread.start()
-        deadline = time.time() + 12
-        while time.time() < deadline:
-            if proc.poll() is not None or self.process is not proc:
-                code = proc.poll()
-                self._starting = False
-                self.stop()
-                raise CoreError(f"Mihomo 启动失败，exit code: {code}")
-            if self._controller_ready(port, secret):
-                self._starting = False
-                redact_runtime_config(cfg, sensitive_urls)
-                self.log("[CORE] Mihomo API 身份验证通过，内核就绪。")
-                return
-            time.sleep(0.2)
+                        f"无法锁定已验证内核/配置，已拒绝提权启动：{e}") from e
 
-        self._starting = False
-        code = proc.poll()
-        self.stop()
-        raise CoreError(
-            f"Mihomo API 未在预期端口通过身份验证（controller={port}, exit={code}）。"
-            "端口可能被占用或内核启动失败。")
+                # The digest comes from the in-memory generated configuration,
+                # not from a post-write reread. Compare again only after the
+                # Windows deny-write/delete locks are held.
+                try:
+                    actual_cfg_hash = self._sha256_path(cfg)
+                except OSError as e:
+                    raise CoreError(f"无法读取锁定后的运行配置：{e}") from e
+                if actual_cfg_hash.lower() != expected_cfg_hash.lower():
+                    raise CoreError(
+                        "运行配置在生成后、提权启动前发生变化，已拒绝启动。")
+
+            # For elevated launch force a fresh core hash verification *inside*
+            # the file/path lock; cached metadata can never authorize runas.
+            self.validate(home, cfg, force_verify=elevate)
+
+            with self._cleanup_lock:
+                self._preflight_ports(settings)
+                self._stopping = False
+                self._starting = True
+                args = ["-d", str(home), "-f", str(cfg)]
+                if elevate:
+                    self.log("[CORE] TUN 需要管理员权限：即将弹出 UAC，对象是锁定且已重新验证的 mihomo.exe 本体。")
+                    try:
+                        self.process = launch_elevated(
+                            self.paths.core_exe, args, cwd=str(self.paths.app))
+                    except ElevationCancelled as e:
+                        self._starting = False
+                        raise CoreError(
+                            "已在 UAC 提示中取消授权；TUN 配置需要管理员权限才能启动内核。") from e
+                    except ElevationError as e:
+                        self._starting = False
+                        raise CoreError(
+                            f"提权启动内核失败（{e}）。也可以手动以管理员身份运行 FLY 后重试。") from e
+                else:
+                    self.process = subprocess.Popen(
+                        [str(self.paths.core_exe)] + args,
+                        cwd=str(self.paths.app),
+                        stdin=subprocess.DEVNULL,
+                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                        text=True, encoding="utf-8", errors="replace",
+                        creationflags=self._flags()
+                    )
+
+            proc = self.process
+            self._assign_job(proc)
+            port = int(settings["controller_port"])
+            secret = settings["api_secret"]
+            if proc.stdout is not None:
+                self.reader_thread = threading.Thread(
+                    target=self._read_output, args=(proc,), daemon=True,
+                    name="core-stdout-reader")
+                self.reader_thread.start()
+            else:
+                self._stream_stop, _ = start_stream(
+                    port, secret,
+                    on_line=self._on_line_safe, log=self.log,
+                    alive=lambda p=proc: p.poll() is None and not self._stopping)
+                self.reader_thread = threading.Thread(
+                    target=self._watch_exit, args=(proc,), daemon=True,
+                    name="core-elevated-wait")
+                self.reader_thread.start()
+
+            deadline = time.time() + 12
+            while time.time() < deadline:
+                if proc.poll() is not None or self.process is not proc:
+                    code = proc.poll()
+                    self._starting = False
+                    self.stop()
+                    raise CoreError(f"Mihomo 启动失败，exit code: {code}")
+                if self._controller_ready(port, secret):
+                    self._starting = False
+                    ready = True
+                    break
+                time.sleep(0.2)
+
+            if not ready:
+                self._starting = False
+                code = proc.poll()
+                self.stop()
+                raise CoreError(
+                    f"Mihomo API 未在预期端口通过身份验证（controller={port}, exit={code}）。"
+                    "端口可能被占用或内核启动失败。")
+        except Exception:
+            self._starting = False
+            if self.process is not None:
+                self.stop()
+            raise
+        finally:
+            if launch_guard is not None:
+                launch_guard.close()
+
+        # Mihomo has authenticated and parsed the exact locked config. It is
+        # now safe to release the lock and scrub secrets from the diagnostic
+        # copy on disk; changing that copy no longer changes the live config.
+        redact_runtime_config(cfg, sensitive_urls)
+        self.log("[CORE] Mihomo API 身份验证通过，内核就绪。")
 
     def stop(self):
         self._stopping = True
@@ -383,19 +450,37 @@ class CoreManager:
         if stop is not None:
             stop.set()
             self._stream_stop = None
+
         proc, self.process = self.process, None
+        reader, self.reader_thread = self.reader_thread, None
         if not proc:
             return
+
         if proc.poll() is None:
             self.log("[CORE] Stopping Mihomo...")
             try:
-                proc.terminate(); proc.wait(timeout=4)
+                proc.terminate()
+                proc.wait(timeout=4)
             except Exception:
                 try:
-                    proc.kill(); proc.wait(timeout=2)
+                    proc.kill()
+                    proc.wait(timeout=2)
                 except Exception:
                     self.log("[CORE] 无法结束提权内核进程，请在任务管理器中手动结束 mihomo.exe。")
+
+        # A normal Popen reader should observe EOF after process exit. Give it
+        # a short chance to drain remaining logs, then close stdout explicitly
+        # so repeated start/stop cycles never rely on GC to release pipe handles.
+        if reader is not None and reader is not threading.current_thread():
+            try: reader.join(timeout=1.0)
+            except Exception: pass
+        self._close_stdout(proc)
+        if reader is not None and reader is not threading.current_thread() and reader.is_alive():
+            try: reader.join(timeout=0.5)
+            except Exception: pass
+
         if hasattr(proc, "close"):
             try: proc.close()
             except Exception: pass
         self.log("[CORE] Stopped.")
+
