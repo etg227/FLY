@@ -216,13 +216,14 @@ FLY 只使用用户自己提供的节点：
 
 ## UAC 信任边界
 
-TUN 模式需要管理员权限，但 v0.8.11 起 **FLY 的 Python 代码永远不提权**：
+TUN 模式需要管理员权限，但 v0.9.0 起 **FLY 的 Python 代码永远不提权**：
 
 ```
 普通权限 GUI（main.py，可写目录里的脚本）
         │  ShellExecuteEx("runas") —— UAC 授权对象是内核本体
         ▼
-管理员权限 mihomo.exe（启动前刚按固定 SHA-256 校验过指纹）
+管理员权限 mihomo.exe（固定 SHA-256；启动前在 Windows 文件锁内重新校验）
+        │  exe / config / 路径目录从校验到 API ready 都禁止替换/rename
         │  仅负责 TUN 与流量转发
         ▲
         └─ GUI 通过带 secret 的本机 API 控制：选节点、拉日志流(/logs)、
@@ -230,9 +231,13 @@ TUN 模式需要管理员权限，但 v0.8.11 起 **FLY 的 Python 代码永远�
 ```
 
 这样设计的意义：用户可写目录里的 `.py` 即使被同机恶意进程篡改，也只能以
-普通权限运行——它可以弹 UAC 骗授权，但 UAC 对话框里显示的是 mihomo.exe，
-而不是「python.exe 执行任意脚本」；真正以管理员运行的东西收敛为
-「固定哈希的二进制 + 它读到的配置」。
+普通权限运行——它可以尝试弹 UAC，但 UAC 授权对象是 mihomo.exe，而不是
+「python.exe 执行任意脚本」。v0.9.0 还会在提权启动前对已生成配置保存内存
+SHA-256，并用 Windows handle 同时锁住 mihomo.exe、config.yaml 以及两者从
+应用根目录开始的路径目录：文件允许读但拒绝写/删除，目录允许正常子项 I/O
+但拒绝 rename/delete。锁内再次校验二进制与配置，直到 Mihomo API 鉴权就绪
+才释放，因此同用户进程若试图在 verify → runas 之间替换文件或路径，只会让
+启动 fail-closed，而不能把未经验证的内容带进管理员进程。
 
 **如实说明残余风险**（放在用户可写目录的软件无法完全消除）：
 
