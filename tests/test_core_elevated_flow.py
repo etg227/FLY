@@ -1,5 +1,5 @@
 """提权路径下 CoreManager 的行为：日志走 API 流、退出被感知、stop 能终止。"""
-import subprocess, tempfile, threading, time, unittest
+import hashlib, subprocess, tempfile, threading, time, unittest
 from pathlib import Path
 from unittest import mock
 
@@ -46,22 +46,28 @@ def _mk(paths_dir):
 class ElevatedFlowTests(unittest.TestCase):
     def _start(self, mgr, proc, stream_rec):
         cfg = Path(tempfile.mkdtemp()) / "config.yaml"; cfg.write_text("x", encoding="utf-8")
+        digest = hashlib.sha256(b"x").hexdigest()
+        guard = mock.Mock()
         def fake_stream(port, secret, on_line, log, alive, level="warning"):
             stop = threading.Event()
             stream_rec.append({"port": port, "secret": secret, "on_line": on_line,
                                "alive": alive, "stop": stop})
             return stop, threading.Thread(target=lambda: None)
         with mock.patch.object(cm, "launch_elevated", return_value=proc) as le, \
+             mock.patch.object(cm, "lock_launch_inputs", return_value=guard) as lock_inputs, \
              mock.patch.object(cm, "start_stream", side_effect=fake_stream), \
              mock.patch.object(cm, "build_runtime_config",
-                               return_value=(cfg.parent, cfg, [])), \
+                               return_value=(cfg.parent, cfg, [], digest)), \
              mock.patch.object(cm, "redact_runtime_config"), \
-             mock.patch.object(CoreManager, "validate"), \
+             mock.patch.object(CoreManager, "validate") as validate, \
              mock.patch.object(CoreManager, "cleanup_orphans"), \
              mock.patch.object(CoreManager, "_preflight_ports"), \
              mock.patch.object(CoreManager, "_assign_job"), \
              mock.patch.object(CoreManager, "_controller_ready", return_value=True):
             mgr.start(["dmm"], elevate=True)
+        self.last_guard = guard
+        self.last_lock = lock_inputs
+        self.last_validate = validate
         return le
 
     def test_elevated_start_uses_api_log_stream_with_secret(self):
@@ -69,6 +75,10 @@ class ElevatedFlowTests(unittest.TestCase):
         proc, rec = FakeElevated(), []
         le = self._start(mgr, proc, rec)
         self.assertTrue(le.called)
+        self.last_lock.assert_called_once()
+        self.last_validate.assert_called_once()
+        self.assertTrue(self.last_validate.call_args.kwargs.get("force_verify"))
+        self.last_guard.close.assert_called_once()
         self.assertEqual(len(rec), 1)
         self.assertTrue(rec[0]["secret"])
         rec[0]["on_line"]("dial FLY-JP error: x")      # 流内容进入 on_line 钩子
@@ -99,17 +109,40 @@ class ElevatedFlowTests(unittest.TestCase):
     def test_uac_cancel_becomes_friendly_core_error(self):
         mgr, logs, exits, lines = _mk(tempfile.mkdtemp())
         cfg = Path(tempfile.mkdtemp()) / "c.yaml"; cfg.write_text("x", encoding="utf-8")
+        digest = hashlib.sha256(b"x").hexdigest()
+        guard = mock.Mock()
         with mock.patch.object(cm, "launch_elevated",
                                side_effect=ElevationCancelled("已取消")), \
+             mock.patch.object(cm, "lock_launch_inputs", return_value=guard), \
              mock.patch.object(cm, "build_runtime_config",
-                               return_value=(cfg.parent, cfg, [])), \
+                               return_value=(cfg.parent, cfg, [], digest)), \
              mock.patch.object(CoreManager, "validate"), \
              mock.patch.object(CoreManager, "cleanup_orphans"), \
              mock.patch.object(CoreManager, "_preflight_ports"):
             with self.assertRaises(CoreError) as ctx:
                 mgr.start(["dmm"], elevate=True)
+        guard.close.assert_called_once()
         self.assertIn("取消授权", str(ctx.exception))
         self.assertIsNone(mgr.process)
+
+    def test_config_tamper_after_generation_blocks_runas(self):
+        mgr, logs, exits, lines = _mk(tempfile.mkdtemp())
+        proc = FakeElevated()
+        cfg = Path(tempfile.mkdtemp()) / "config.yaml"
+        cfg.write_text("tampered", encoding="utf-8")
+        expected = hashlib.sha256(b"original").hexdigest()
+        guard = mock.Mock()
+        with mock.patch.object(cm, "lock_launch_inputs", return_value=guard), \
+             mock.patch.object(cm, "build_runtime_config",
+                               return_value=(cfg.parent, cfg, [], expected)), \
+             mock.patch.object(cm, "launch_elevated", return_value=proc) as le, \
+             mock.patch.object(CoreManager, "cleanup_orphans"), \
+             mock.patch.object(CoreManager, "_preflight_ports"):
+            with self.assertRaises(CoreError) as ctx:
+                mgr.start(["dmm"], elevate=True)
+        self.assertIn("发生变化", str(ctx.exception))
+        le.assert_not_called()
+        guard.close.assert_called_once()
 
     def test_non_elevated_path_still_uses_stdout_pipe(self):
         mgr, logs, exits, lines = _mk(tempfile.mkdtemp())
@@ -131,7 +164,8 @@ class ElevatedFlowTests(unittest.TestCase):
         streams = []
         with mock.patch.object(cm.subprocess, "Popen", return_value=FakePopen()), \
              mock.patch.object(cm, "start_stream", side_effect=lambda *a, **k: streams.append(1)), \
-             mock.patch.object(cm, "build_runtime_config", return_value=(cfg.parent, cfg, [])), \
+             mock.patch.object(cm, "build_runtime_config",
+                               return_value=(cfg.parent, cfg, [], hashlib.sha256(b"x").hexdigest())), \
              mock.patch.object(cm, "redact_runtime_config"), \
              mock.patch.object(CoreManager, "validate"), \
              mock.patch.object(CoreManager, "cleanup_orphans"), \
