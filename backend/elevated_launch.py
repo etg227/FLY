@@ -18,6 +18,7 @@ TUN 需要管理员，但把整套 Python GUI 提权，意味着用户可写目�
 """
 from __future__ import annotations
 import os, subprocess
+from pathlib import Path
 
 SEE_MASK_NOCLOSEPROCESS = 0x00000040
 SEE_MASK_NOASYNC = 0x00000100
@@ -29,8 +30,10 @@ ERROR_CANCELLED = 1223
 STILL_ACTIVE = 259
 GENERIC_READ = 0x80000000
 FILE_SHARE_READ = 0x00000001
+FILE_SHARE_WRITE = 0x00000002
 OPEN_EXISTING = 3
 FILE_ATTRIBUTE_NORMAL = 0x00000080
+FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
 
 class ElevationError(RuntimeError):
     """提权启动失败（环境不支持 / API 失败）。"""
@@ -96,19 +99,21 @@ def _real_backend():
         def close(self, handle):
             kernel32.CloseHandle(handle)
 
-        def open_read_lock(self, path):
-            # FILE_SHARE_READ only: other readers/process creation are allowed,
-            # but WRITE and DELETE opens are denied for the lifetime of this
-            # handle. This closes the verify -> runas path-replacement window.
+        def open_read_lock(self, path, directory=False):
+            # Files: share READ only -> deny write/delete replacement.
+            # Directories: share READ|WRITE but not DELETE -> normal child I/O
+            # remains possible while rename/delete of the path component fails.
             kernel32.CreateFileW.argtypes = [
                 wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
                 ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD,
                 wintypes.HANDLE,
             ]
             kernel32.CreateFileW.restype = wintypes.HANDLE
+            share = FILE_SHARE_READ | (FILE_SHARE_WRITE if directory else 0)
+            flags = FILE_ATTRIBUTE_NORMAL | (FILE_FLAG_BACKUP_SEMANTICS if directory else 0)
             handle = kernel32.CreateFileW(
-                str(path), GENERIC_READ, FILE_SHARE_READ, None,
-                OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, None,
+                str(path), GENERIC_READ, share, None,
+                OPEN_EXISTING, flags, None,
             )
             invalid = ctypes.c_void_p(-1).value
             value = ctypes.cast(handle, ctypes.c_void_p).value if handle else None
@@ -156,10 +161,43 @@ def lock_launch_inputs(paths, win=None):
         if os.name != "nt":
             raise ElevationError("启动输入锁仅在 Windows 上可用。")
         win = _real_backend()
+    file_paths = [Path(p).resolve() for p in paths]
+    if not file_paths:
+        raise ElevationError("没有可锁定的启动文件。")
+
+    # Lock the common application root and every directory component below it
+    # against rename/delete. This prevents a same-user process from swapping a
+    # parent directory/junction while the leaf files themselves remain locked.
+    common = Path(os.path.commonpath([str(p) for p in file_paths]))
+    if common in file_paths:
+        common = common.parent
+    directories = []
+    seen_dirs = set()
+    for p in file_paths:
+        cur = p.parent
+        chain = []
+        while True:
+            chain.append(cur)
+            if cur == common or cur.parent == cur:
+                break
+            cur = cur.parent
+        for d in reversed(chain):
+            key = os.path.normcase(str(d))
+            if key not in seen_dirs:
+                seen_dirs.add(key)
+                directories.append(d)
+
     handles = []
     try:
-        for path in paths:
-            handle, err = win.open_read_lock(str(path))
+        for path in directories:
+            handle, err = win.open_read_lock(str(path), directory=True)
+            if not handle:
+                raise ElevationError(
+                    f"无法锁定启动目录 {path}（错误码 {err}）；"
+                    "目录可能正被其他程序修改。")
+            handles.append(handle)
+        for path in file_paths:
+            handle, err = win.open_read_lock(str(path), directory=False)
             if not handle:
                 raise ElevationError(
                     f"无法锁定启动文件 {path}（错误码 {err}）；"
