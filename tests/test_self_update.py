@@ -36,7 +36,8 @@ class ScheduleTests(unittest.TestCase):
 
     def test_runs_the_current_interpreter_not_a_shell_script(self):
         spawn = Recorder()
-        with mock.patch.object(self_update, "_IS_WINDOWS", True):
+        with mock.patch.object(self_update, "_IS_WINDOWS", True), \
+             mock.patch.object(self_update.sys, "frozen", False, create=True):
             schedule_launcher_replace(self.root, spawn=spawn)
         argv = spawn.calls[0][0]
         self.assertEqual(argv[0], sys.executable)
@@ -48,6 +49,22 @@ class ScheduleTests(unittest.TestCase):
         self.assertIn("os.replace", argv[2])
         self.assertEqual(argv[3:], [str(self.root / "launcher.exe.new"),
                                     str(self.root / "launcher.exe")])
+
+    def test_frozen_mode_uses_powershell_with_paths_in_environment(self):
+        spawn = Recorder()
+        with mock.patch.object(self_update, "_IS_WINDOWS", True), \
+             mock.patch.object(self_update.sys, "frozen", True, create=True):
+            self.assertTrue(schedule_launcher_replace(self.root, spawn=spawn))
+        argv, kw = spawn.calls[0]
+        self.assertEqual(argv[0].lower(), "powershell.exe")
+        self.assertIn("-Command", argv)
+        self.assertNotIn(str(self.root), " ".join(argv),
+                         "user-controlled paths must not be interpolated into PowerShell code")
+        self.assertEqual(kw["env"]["FLY_REPLACE_SRC"],
+                         str(self.root / "launcher.exe.new"))
+        self.assertEqual(kw["env"]["FLY_REPLACE_DST"],
+                         str(self.root / "launcher.exe"))
+        self.assertEqual(list(self.root.glob("*.cmd")), [])
 
     def test_replacer_source_actually_replaces(self):
         src, dst = self.root / "launcher.exe.new", self.root / "launcher.exe"
