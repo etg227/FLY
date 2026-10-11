@@ -26,6 +26,7 @@ from backend import win_tray
 from backend.system_proxy import SystemProxy
 from backend.self_update import schedule_launcher_replace
 from backend.windows_admin import is_admin
+from backend.managed_runtime import ManagedRuntime, resolve_paths
 from backend.ui_theme import (
     C, FONTS, ICONS, Card, Hero, MiniBars, NavItem, ProfileTile, QuotaBars, RoundButton, SpeedChart,
     StatTile, StatusPill, SwitchRow, ToastHost, apply_theme, autohide, autowrap, rounded_rect, slide_in,
@@ -44,7 +45,7 @@ def _needs_tun(profile):
             bool(profile.get("processes")))
 
 class FlyApp:
-    def __init__(self, root, initial_games=None, autostart=False):
+    def __init__(self, root, initial_games=None, autostart=False, managed_runtime=None):
         ensure_private_files(PATHS)
         self.root = root
         self.version = app_version(PATHS)
@@ -69,7 +70,9 @@ class FlyApp:
             self._log_file.flush()
         except OSError:
             pass
-        schedule_launcher_replace(PATHS.app, self.log)
+        self.managed_runtime = managed_runtime
+        if managed_runtime is None:
+            schedule_launcher_replace(PATHS.app, self.log)
         self.core = CoreManager(PATHS, self.log, on_exit=self._on_core_exit,
                                 on_line=self._on_core_line)
         self.sysproxy = SystemProxy(PATHS.runtime / "sysproxy_backup.json", self.log)
@@ -136,9 +139,23 @@ class FlyApp:
             self.log("[CONFIG] " + warning)
         self.sysproxy.restore_orphan()
         threading.Thread(target=self.core.cleanup_orphans,daemon=True).start()
+        if self.managed_runtime is not None:
+            self.managed_runtime.mark_ready()
+            self.root.after(250, self._poll_managed_runtime)
         if autostart:
             self.log("[FLY] Autostart requested (admin relaunch).")
             self.root.after(300, self._autostart_when_core_ready)
+
+    def _poll_managed_runtime(self):
+        if self._closing:
+            return
+        action = self.managed_runtime.poll()
+        if action == "stop":
+            self.on_close()
+            return
+        if action == "show":
+            self.show_window()
+        self.root.after(250, self._poll_managed_runtime)
 
     def build(self):
         apply_theme(self.root)
@@ -1328,12 +1345,17 @@ class CustomProfilesWindow(tk.Toplevel):
         self.on_saved(); toast(self.master,"自定义配置已保存到本机。","ok"); self.destroy()
 
 def main():
+    global PATHS
     p=argparse.ArgumentParser(add_help=False)
     p.add_argument("--games",default="")
     p.add_argument("--game",default="")
     p.add_argument("--autostart",action="store_true")
     p.add_argument("--takeover",action="store_true")
+    p.add_argument("--data-dir",default=None)
+    p.add_argument("--hub-session",default=None)
     args,_=p.parse_known_args()
+    PATHS = resolve_paths(APP_DIR, args.data_dir)
+    managed = ManagedRuntime(PATHS, args.hub_session) if args.hub_session else None
 
     guard=SingleInstance()
     if not guard.acquire(wait_ms=10000 if args.takeover else 0):
@@ -1351,10 +1373,14 @@ def main():
         ensure_private_files(PATHS)
         initial=[g.strip() for g in f"{args.games},{args.game}".split(",") if g.strip()]
         root=tk.Tk()
-        FlyApp(root,initial,args.autostart)
+        FlyApp(root,initial,args.autostart,managed_runtime=managed)
         root.mainloop()
     finally:
-        guard.close()
+        try:
+            if managed is not None:
+                managed.close()
+        finally:
+            guard.close()
 
 if __name__=="__main__":
     try:
