@@ -23,6 +23,10 @@ from backend.subscription import check_subscription, describe_userinfo, fmt_byte
 from backend.system_proxy import SystemProxy
 from backend.self_update import schedule_launcher_replace
 from backend.windows_admin import is_admin
+from backend.ui_theme import (
+    C, FONTS, ICONS, Card, Hero, NavItem, ProfileTile, RoundButton, StatusPill, SwitchRow,
+    apply_theme, autohide, rounded_rect, style_toplevel,
+)
 
 APP_DIR = Path(__file__).resolve().parent
 PATHS = Paths(APP_DIR)
@@ -41,8 +45,8 @@ class FlyApp:
         self.root = root
         self.version = app_version(PATHS)
         self.root.title(f"FLY v{self.version} - Selective Routing")
-        self.root.geometry("900x860")
-        self.root.minsize(820, 760)
+        self.root.geometry("1080x760")
+        self.root.minsize(960, 700)
 
         self.logs = queue.Queue()
         self._log_lock = threading.Lock()
@@ -124,63 +128,223 @@ class FlyApp:
             self.root.after(300, self._autostart_when_core_ready)
 
     def build(self):
-        outer = ttk.Frame(self.root, padding=16); outer.pack(fill="both", expand=True)
-        ttk.Label(outer, text=f"FLY v{self.version}", font=("Segoe UI",21,"bold")).pack(anchor="w")
-        ttk.Label(
-            outer,
-            text="使用你自己的 Clash/Mihomo 节点，只让勾选的区域限定应用/服务走日本线路，其余流量保持本地直连。",
-            wraplength=840
-        ).pack(anchor="w", pady=(0,12))
+        apply_theme(self.root)
+        shell = tk.Frame(self.root, bg=C["bg"]); shell.pack(fill="both", expand=True)
 
-        back = ttk.LabelFrame(outer, text="后端", padding=10); back.pack(fill="x", pady=(0,10))
-        for i, (label, var) in enumerate([("内核：",self.core_var),("节点来源：",self.source_var),("日本节点：",self.node_var)]):
-            r = ttk.Frame(back); r.pack(fill="x", pady=(0 if i==0 else 8,0))
-            ttk.Label(r,text=label,width=14).pack(side="left")
-            ttk.Label(r,textvariable=var,font=("Segoe UI",10,"bold") if i==2 else None).pack(side="left")
-            if i==1:
-                ttk.Button(r,text="节点 / 应用设置",command=self.open_settings).pack(side="right")
-            elif i==2:
-                ttk.Label(r,text="延迟：").pack(side="left", padx=(18,4))
-                ttk.Label(r,textvariable=self.delay_var).pack(side="left")
-        for label, var in [("订阅流量：",self.sub_var),("实时流量：",self.traffic_var)]:
-            r = ttk.Frame(back); r.pack(fill="x", pady=(8,0))
-            ttk.Label(r,text=label,width=14).pack(side="left")
-            ttk.Label(r,textvariable=var).pack(side="left")
+        # ---- 左侧导航栏 ----
+        nav = tk.Frame(shell, bg=C["nav"], width=200); nav.pack(side="left", fill="y")
+        nav.pack_propagate(False)
+        brand = tk.Frame(nav, bg=C["nav"]); brand.pack(fill="x", padx=20, pady=(24, 28))
+        mark = tk.Canvas(brand, width=36, height=36, bg=C["nav"], highlightthickness=0, bd=0)
+        rounded_rect(mark, 0, 0, 36, 36, 10, fill=C["accent"], outline="")
+        mark.create_text(18, 18, text="F", fill="#FFFFFF", font=FONTS["h3"])
+        mark.pack(side="left")
+        names = tk.Frame(brand, bg=C["nav"]); names.pack(side="left", padx=(12, 0))
+        tk.Label(names, text="FLY", font=FONTS["h3"], bg=C["nav"], fg="#FFFFFF").pack(anchor="w")
+        tk.Label(names, text=f"v{self.version}", font=FONTS["small"],
+                 bg=C["nav"], fg=C["nav_text"]).pack(anchor="w")
+        self.nav_items = {}
+        for key, icon, text in (("home", "home", "主页"), ("profiles", "profiles", "分流配置"),
+                                ("log", "log", "运行日志"), ("about", "about", "分流保证")):
+            item = NavItem(nav, icon, text, lambda k=key: self.show_page(k))
+            item.pack(fill="x", padx=10, pady=2)
+            self.nav_items[key] = item
+        bottom = tk.Frame(nav, bg=C["nav"]); bottom.pack(side="bottom", fill="x", pady=(0, 18))
+        NavItem(bottom, "settings", "节点 / 应用设置", self.open_settings).pack(fill="x", padx=10)
+        tk.Label(bottom, text="未命中规则 → DIRECT", font=FONTS["small"], bg=C["nav"],
+                 fg=C["muted"]).pack(anchor="w", padx=24, pady=(12, 0))
 
-        prof = ttk.LabelFrame(outer,text="分流配置（可多选，同时加速）",padding=12)
-        prof.pack(fill="x", pady=(0,10))
-        self.profiles_frame = ttk.Frame(prof); self.profiles_frame.pack(fill="x")
-        self.services_cb = ttk.Checkbutton(prof, variable=self.services_var,
-                                           command=self._services_toggled,
-                                           text="默认加速常用服务")
-        self.services_cb.pack(anchor="w", pady=(8,0))
-        actions = ttk.Frame(prof); actions.pack(fill="x", pady=(8,0))
-        ttk.Button(actions,text="添加/管理加速网站...",command=self.open_custom_sites).pack(side="left")
-        ttk.Label(actions,text="填个网址就能加自己的加速项，只保存在本机 private\\。").pack(side="left", padx=(10,0))
+        # ---- 页面容器 ----
+        host = tk.Frame(shell, bg=C["bg"]); host.pack(side="left", fill="both", expand=True)
+        self.pages = {}
+        for key in self.nav_items:
+            page = tk.Frame(host, bg=C["bg"], padx=24, pady=22)
+            page.place(relx=0, rely=0, relwidth=1, relheight=1)
+            self.pages[key] = page
+        self._build_home(self.pages["home"])
+        self._build_profiles(self.pages["profiles"])
+        self._build_log(self.pages["log"])
+        self._build_about(self.pages["about"])
+        self.show_page("home")
 
-        buttons = ttk.Frame(outer); buttons.pack(fill="x",pady=(2,12))
-        self.start_btn = ttk.Button(buttons,text="一键加速",command=self.start_accel); self.start_btn.pack(side="left")
-        ttk.Button(buttons,text="停止",command=self.stop_accel).pack(side="left",padx=8)
-        self.switch_btn = ttk.Button(buttons,text="换日本节点",command=self.switch_node)
-        self.switch_btn.pack(side="left",padx=8)
-        ttk.Button(buttons,text="刷新状态",command=self.refresh_status).pack(side="left",padx=8)
-        ttk.Label(buttons,text="状态：").pack(side="right")
-        ttk.Label(buttons,textvariable=self.status_var,font=("Segoe UI",10,"bold")).pack(side="right",padx=(0,5))
+    def show_page(self, key):
+        self.pages[key].tkraise()
+        for k, item in self.nav_items.items():
+            item.set_selected(k == key)
 
-        route = ttk.LabelFrame(outer,text="分流保证",padding=10); route.pack(fill="x",pady=(0,10))
-        ttk.Label(route,justify="left",wraplength=840,text=(
-            "域名 / IP / 端口 / 进程规则全部显式声明，未命中业务规则的连接最终 MATCH,DIRECT；局域网/链路本地地址强制 DIRECT。\n"
-            "标注“整浏览器”的配置使用 TUN 按浏览器进程匹配，不再把所有使用系统代理的软件一起送去日本线路。\n"
-            "TUN 模式会由本机 Mihomo 接管 DNS，但 DIRECT 连接使用系统 DNS 重新解析；纯域名配置才使用 Windows 系统代理，停止或异常退出会自动还原。\n"
-            "TUN 需要管理员时，UAC 只授权给哈希校验过的 mihomo 内核本体，FLY 程序自身始终保持普通权限。"
-        )).pack(anchor="w")
+    def _page_header(self, page, title, subtitle):
+        head = tk.Frame(page, bg=C["bg"]); head.pack(fill="x", pady=(0, 14))
+        tk.Label(head, text=title, font=FONTS["h2"], bg=C["bg"], fg=C["text"]).pack(anchor="w")
+        tk.Label(head, text=subtitle, font=FONTS["ui"], bg=C["bg"], fg=C["subtext"],
+                 justify="left", wraplength=760).pack(anchor="w", pady=(4, 0))
+        return head
 
-        logf = ttk.LabelFrame(outer,text="Live log",padding=8); logf.pack(fill="both",expand=True)
+    def _card_title(self, card, icon, text):
+        row = tk.Frame(card.body, bg=card.fill); row.pack(fill="x")
+        tk.Label(row, text=ICONS.get(icon, ""), font=FONTS["icon_s"], bg=card.fill,
+                 fg=C["accent"]).pack(side="left")
+        tk.Label(row, text=text, font=FONTS["small"], bg=card.fill, fg=C["subtext"]).pack(side="left", padx=(6, 0))
+        return row
+
+    def _kv(self, parent, label, var, bold=False, wrap=0):
+        row = tk.Frame(parent, bg=parent.cget("bg")); row.pack(fill="x", pady=(8, 0))
+        tk.Label(row, text=label, width=8, anchor="w", font=FONTS["ui"], bg=row.cget("bg"),
+                 fg=C["subtext"]).pack(side="left", anchor="n")
+        tk.Label(row, textvariable=var, anchor="w", justify="left", wraplength=wrap,
+                 font=FONTS["ui_b"] if bold else FONTS["ui"], bg=row.cget("bg"),
+                 fg=C["text"]).pack(side="left", fill="x", expand=True)
+        return row
+
+    def _build_home(self, page):
+        hero = Hero(page, "FLY",
+                    "使用你自己的 Clash/Mihomo 节点，只让勾选的区域限定应用/服务走日本线路，其余流量保持本地直连。",
+                    badge=f"v{self.version}", height=168)
+        hero.pack(fill="x")
+        hero.place_widget(StatusPill(hero, self.status_var, on_dark=True, bg=C["accent2"]))
+
+        # 底部操作栏（BakaXL 式：左侧次要操作，右侧大启动按钮）
+        bar = tk.Frame(page, bg=C["bg"]); bar.pack(side="bottom", fill="x", pady=(16, 0))
+        self.start_btn = RoundButton(bar, text="一键加速", subtitle="", command=self.start_accel,
+                                     kind="accent", width=240, height=66, radius=14, font=FONTS["big"])
+        self.start_btn.pack(side="right")
+        left = tk.Frame(bar, bg=C["bg"]); left.pack(side="left", fill="y")
+        RoundButton(left, text="停止", icon="stop", kind="danger", command=self.stop_accel,
+                    width=96, height=40).pack(side="left", pady=(14, 0))
+        self.switch_btn = RoundButton(left, text="换日本节点", icon="swap", command=self.switch_node,
+                                      width=132, height=40)
+        self.switch_btn.pack(side="left", padx=(10, 0), pady=(14, 0))
+        RoundButton(left, text="刷新状态", icon="refresh", command=self.refresh_status,
+                    width=118, height=40).pack(side="left", padx=(10, 0), pady=(14, 0))
+
+        grid = tk.Frame(page, bg=C["bg"]); grid.pack(fill="both", expand=True, pady=(16, 0))
+        grid.columnconfigure(0, weight=1, uniform="c"); grid.columnconfigure(1, weight=1, uniform="c")
+
+        node = Card(grid); node.grid(row=0, column=0, sticky="nsew", padx=(0, 8), pady=(0, 16))
+        self._card_title(node, "globe", "日本节点")
+        tk.Label(node.body, textvariable=self.node_var, font=FONTS["value"], bg=node.fill, fg=C["text"],
+                 anchor="w", justify="left", wraplength=320).pack(fill="x", pady=(10, 0))
+        lat = tk.Frame(node.body, bg=node.fill); lat.pack(fill="x", pady=(6, 0))
+        tk.Label(lat, text="延迟", font=FONTS["small"], bg=node.fill, fg=C["subtext"]).pack(side="left")
+        tk.Label(lat, textvariable=self.delay_var, font=FONTS["ui_b"], bg=node.fill,
+                 fg=C["accent"]).pack(side="left", padx=(8, 0))
+
+        back = Card(grid); back.grid(row=0, column=1, sticky="nsew", padx=(8, 0), pady=(0, 16))
+        head = self._card_title(back, "chip", "后端")
+        RoundButton(head, text="设置", command=self.open_settings, width=64, height=28, radius=8,
+                    font=FONTS["small"]).pack(side="right")
+        self._kv(back.body, "内核", self.core_var, bold=True)
+        self._kv(back.body, "节点来源", self.source_var, wrap=260)
+
+        traffic = Card(grid); traffic.grid(row=1, column=0, columnspan=2, sticky="nsew", pady=(0, 16))
+        self._card_title(traffic, "speed", "流量")
+        self._kv(traffic.body, "订阅流量", self.sub_var, wrap=640)
+        self._kv(traffic.body, "实时流量", self.traffic_var)
+
+        sel = Card(grid); sel.grid(row=2, column=0, columnspan=2, sticky="nsew")
+        head = self._card_title(sel, "profiles", "本次加速")
+        link = tk.Label(head, text="管理分流配置 ›", font=FONTS["small"], bg=sel.fill, fg=C["accent"],
+                        cursor="hand2")
+        link.pack(side="right")
+        link.bind("<Button-1>", lambda e: self.show_page("profiles"))
+        self.selection_var = tk.StringVar(value="-")
+        tk.Label(sel.body, textvariable=self.selection_var, font=FONTS["ui"], bg=sel.fill, fg=C["text"],
+                 anchor="w", justify="left", wraplength=680).pack(fill="x", pady=(8, 0))
+
+    def _build_profiles(self, page):
+        head = self._page_header(page, "分流配置",
+                                 "可多选，同时加速。只有勾选配置里显式声明的域名 / IP / 进程会走日本线路，其余流量一律直连。")
+        RoundButton(head, text="添加加速网站", icon="add", kind="accent", command=self.open_custom_sites,
+                    width=150, height=40).place(relx=1, rely=0, anchor="ne")
+
+        svc = Card(page); svc.pack(fill="x", pady=(0, 14))
+        self.services_cb = SwitchRow(svc.body, self.services_var, text="默认加速常用服务",
+                                     command=self._services_toggled)
+        self.services_cb.pack(fill="x")
+
+        tk.Label(page, text="填个网址就能加自己的加速项，只保存在本机 private\\。",
+                 font=FONTS["small"], bg=C["bg"], fg=C["muted"]).pack(side="bottom", anchor="w", pady=(10, 0))
+
+        wrap = tk.Frame(page, bg=C["bg"]); wrap.pack(fill="both", expand=True)
+        canvas = tk.Canvas(wrap, bg=C["bg"], highlightthickness=0, bd=0)
+        sb = ttk.Scrollbar(wrap, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=autohide(sb, side="right", fill="y", before=canvas))
+        canvas.pack(side="left", fill="both", expand=True)
+        self.profiles_frame = tk.Frame(canvas, bg=C["bg"])
+        self.profiles_frame.columnconfigure(0, weight=1, uniform="p")
+        self.profiles_frame.columnconfigure(1, weight=1, uniform="p")
+        win = canvas.create_window(0, 0, window=self.profiles_frame, anchor="nw")
+        self.profiles_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>", lambda e: canvas.itemconfigure(win, width=e.width - 6))
+
+        def wheel(e):
+            if canvas.yview() != (0.0, 1.0):
+                canvas.yview_scroll(-1 if (e.delta > 0 or e.num == 4) else 1, "units")
+        canvas.bind("<Enter>", lambda e: (canvas.bind_all("<MouseWheel>", wheel),
+                                          canvas.bind_all("<Button-4>", wheel), canvas.bind_all("<Button-5>", wheel)))
+        canvas.bind("<Leave>", lambda e: (canvas.unbind_all("<MouseWheel>"),
+                                          canvas.unbind_all("<Button-4>"), canvas.unbind_all("<Button-5>")))
+
+    def _build_log(self, page):
+        head = self._page_header(page, "运行日志",
+                                 "runtime\\fly.log 为自动脱敏诊断日志，反馈问题时附上该文件即可；不要发送 private\\ 目录。")
+        RoundButton(head, text="打开日志目录", icon="link", command=self._open_runtime_dir,
+                    width=140, height=36).place(relx=1, rely=0, anchor="ne")
+        box = tk.Frame(page, bg=C["log_bg"], padx=4, pady=4); box.pack(fill="both", expand=True)
         self.logbox = tk.Text(
-            logf, wrap="word", font=("Consolas",9), height=14, state="disabled"
+            box, wrap="word", font=FONTS["mono"], height=14, state="disabled",
+            bg=C["log_bg"], fg=C["log_fg"], insertbackground=C["log_fg"], relief="flat", bd=0,
+            highlightthickness=0, padx=12, pady=10, selectbackground="#2F3A57", spacing1=1, spacing3=1
         )
-        self.logbox.pack(side="left",fill="both",expand=True)
-        sb=ttk.Scrollbar(logf,orient="vertical",command=self.logbox.yview); sb.pack(side="right",fill="y"); self.logbox.configure(yscrollcommand=sb.set)
+        sb = ttk.Scrollbar(box, orient="vertical", command=self.logbox.yview, style="Log.Vertical.TScrollbar")
+        self.logbox.pack(side="left", fill="both", expand=True)
+        self.logbox.configure(yscrollcommand=autohide(sb, side="right", fill="y", before=self.logbox))
+        self.logbox.tag_configure("time", foreground="#6F7A94")
+        self.logbox.tag_configure("err", foreground="#FF7A7F")
+        self.logbox.tag_configure("warn", foreground="#F5C062")
+        self.logbox.tag_configure("ok", foreground="#5FD9A0")
+
+    def _build_about(self, page):
+        self._page_header(page, "分流保证", "FLY 的目标是正确的选择性分流，而不是承诺把低质量节点变快。")
+        rules = Card(page); rules.pack(fill="x")
+        for i, text in enumerate((
+            "域名 / IP / 端口 / 进程规则全部显式声明，未命中业务规则的连接最终 MATCH,DIRECT；局域网/链路本地地址强制 DIRECT。",
+            "标注“整浏览器”的配置使用 TUN 按浏览器进程匹配，不再把所有使用系统代理的软件一起送去日本线路。",
+            "TUN 模式会由本机 Mihomo 接管 DNS，但 DIRECT 连接使用系统 DNS 重新解析；纯域名配置才使用 Windows 系统代理，停止或异常退出会自动还原。",
+            "TUN 需要管理员时，UAC 只授权给哈希校验过的 mihomo 内核本体，FLY 程序自身始终保持普通权限。",
+        )):
+            row = tk.Frame(rules.body, bg=rules.fill); row.pack(fill="x", pady=(0 if i == 0 else 12, 0))
+            tk.Label(row, text=ICONS.get("check", ""), font=FONTS["icon_s"], bg=rules.fill,
+                     fg=C["ok"]).pack(side="left", anchor="n", padx=(0, 10))
+            tk.Label(row, text=text, font=FONTS["ui"], bg=rules.fill, fg=C["text"], anchor="w",
+                     justify="left", wraplength=700).pack(side="left", fill="x", expand=True)
+        info = Card(page); info.pack(fill="x", pady=(14, 0))
+        self._card_title(info, "about", f"关于 FLY v{self.version}")
+        tk.Label(info.body, justify="left", anchor="w", wraplength=720, bg=info.fill, fg=C["subtext"],
+                 font=FONTS["ui"], text=(
+                     "FLY 是开源的 Mihomo 选择性代理 / 策略分流前端。FLY 不提供代理节点、VPS、会员、账号、付费、兑换码或任何网络服务；"
+                     "订阅 URL、UUID 等凭据只保存在本机 private\\ 目录。")).pack(fill="x", pady=(8, 0))
+
+    def _open_runtime_dir(self):
+        try:
+            PATHS.runtime.mkdir(parents=True, exist_ok=True)
+            os.startfile(str(PATHS.runtime))
+        except (AttributeError, OSError) as e:
+            self.log(f"[LOG] 无法打开日志目录：{e}")
+
+    def _update_launch_hint(self, *_):
+        names = [self.profile_by_id[pid]["name"] for pid in self.selected_profiles() if pid in self.profile_by_id]
+        services = bool(self.services_var.get()) and bool(self.always_on)
+        if names:
+            short = "、".join(names[:2]) + (f" 等 {len(names)} 项" if len(names) > 2 else "")
+        else:
+            short = "常用服务" if services else "未选择分流配置"
+        if names and services:
+            short += " + 常用服务"
+        self.start_btn.configure(subtitle=short)
+        full = "、".join(names) if names else "（未勾选分流配置）"
+        if services:
+            full += "\n默认加速常用服务：" + "、".join(p["name"] for p in self.always_on)
+        self.selection_var.set(full)
 
     def reload_profiles(self, first=False):
         previous = {pid for pid,var in self.profile_vars.items() if var.get()}
@@ -200,21 +364,23 @@ class FlyApp:
         for i, profile in enumerate(selectable):
             pid = profile["id"]
             var = tk.BooleanVar(value=pid in initial)
+            var.trace_add("write", self._update_launch_hint)
             self.profile_vars[pid] = var
-            source = "自定义" if profile.get("source")=="custom" else ""
             mode = "TUN" if _needs_tun(profile) else "域名"
             if profile.get("full_browser"):
                 mode = "整浏览器"
-            text = f"{profile['name']}  [{mode}{' / '+source if source else ''}]"
-            ttk.Checkbutton(self.profiles_frame,text=text,variable=var).grid(
-                row=i//2,column=i%2,sticky="w",padx=(0,24),pady=2
+            tags = [mode] + (["自定义"] if profile.get("source")=="custom" else [])
+            ProfileTile(self.profiles_frame, profile["name"], tags, var).grid(
+                row=i//2, column=i%2, sticky="nsew", padx=(0 if i%2==0 else 6, 6 if i%2==0 else 0), pady=(0,12)
             )
+        self._update_launch_hint()
 
     def selected_profiles(self):
         return [r["id"] for r in self.profiles if self.profile_vars.get(r["id"]) and self.profile_vars[r["id"]].get()]
 
     def _services_toggled(self):
         update_app_settings(PATHS, {"services_enabled": bool(self.services_var.get())})
+        self._update_launch_hint()
         state="开启" if self.services_var.get() else "关闭"
         self.log(f"[SERVICES] 常用服务默认加速已{state}。")
         if self.core.is_running():
@@ -266,7 +432,9 @@ class FlyApp:
                 # again so keyboard input cannot modify diagnostic text.
                 self.logbox.configure(state="normal")
                 for x in pending:
-                    self.logbox.insert("end",x+"\n")
+                    stamp, _, rest = x.partition(" ")
+                    self.logbox.insert("end", stamp+" ", "time")
+                    self.logbox.insert("end", rest+"\n", self._log_tag(rest))
                 rows = int(self.logbox.index("end-1c").split(".")[0])
                 if rows > 2000:
                     self.logbox.delete("1.0", f"{rows-1800}.0")
@@ -280,6 +448,16 @@ class FlyApp:
                     pass
         if not self._closing:
             self.root.after(100,self.flush_logs)
+
+    @staticmethod
+    def _log_tag(text):
+        if "[ERROR]" in text or "异常" in text or "失败" in text:
+            return "err"
+        if "[WARN" in text or "[CONFIG]" in text or "警告" in text:
+            return "warn"
+        if "就绪" in text or "加速中" in text or "已选择" in text:
+            return "ok"
+        return ()
 
     def refresh_status(self):
         cached = self.core.verification_detail()
@@ -704,7 +882,7 @@ class FlyApp:
 class SettingsWindow(tk.Toplevel):
     def __init__(self,master,profiles,on_saved):
         super().__init__(master)
-        self.title("FLY - 节点 / 应用设置"); self.geometry("720x660")
+        self.title("FLY - 节点 / 应用设置"); self.geometry("740x740"); style_toplevel(self)
         ensure_private_files(PATHS)
         src=load_node_source(PATHS); app=load_app_settings(PATHS)
         self.on_saved=on_saved
@@ -721,7 +899,9 @@ class SettingsWindow(tk.Toplevel):
         ttk.Radiobutton(box,text="本地 private\\nodes.yaml",variable=self.mode,value="file").pack(anchor="w")
         ttk.Radiobutton(box,text="Clash/Mihomo 订阅 URL（可填多条，每行一个；节点合并使用，一家挂了自动用另一家）",
                         variable=self.mode,value="subscription").pack(anchor="w",pady=(8,0))
-        self.sub_text=tk.Text(box,height=3,font=("Consolas",9))
+        self.sub_text=tk.Text(box,height=3,font=FONTS["mono"],relief="flat",bd=0,bg=C["card"],
+                              highlightthickness=1,highlightbackground=C["border"],highlightcolor=C["accent"],
+                              padx=8,pady=6)
         self.sub_text.pack(fill="x",pady=(7,0))
         self.sub_text.insert("1.0","\n".join(self._sub_urls))
         ttk.Button(box,text="打开 nodes.yaml",command=lambda:os.startfile(str(PATHS.nodes_yaml))).pack(anchor="w",pady=(10,0))
@@ -743,7 +923,7 @@ class SettingsWindow(tk.Toplevel):
 
         ttk.Label(f,text="订阅 URL、UUID 等凭据只保存在本机 private\\ 目录，已被 Git 排除。FLY 不提供节点、账号、会员或 VPS 服务。",
                   wraplength=670).pack(anchor="w",pady=(14,0))
-        ttk.Button(f,text="保存",command=self.save).pack(anchor="e",pady=(14,0))
+        ttk.Button(f,text="保存",style="Accent.TButton",command=self.save).pack(anchor="e",pady=(14,0))
 
     def browse(self,pid):
         p=filedialog.askopenfilename(filetypes=[("Windows executable","*.exe"),("All files","*.*")])
@@ -777,11 +957,11 @@ class SettingsWindow(tk.Toplevel):
 class CustomSitesWindow(tk.Toplevel):
     def __init__(self,master,on_saved):
         super().__init__(master)
-        self.title("FLY - 添加/管理加速网站"); self.geometry("640x520")
+        self.title("FLY - 添加/管理加速网站"); self.geometry("640x520"); style_toplevel(self)
         self.on_saved=on_saved
 
         f=ttk.Frame(self,padding=14); f.pack(fill="both",expand=True)
-        ttk.Label(f,text="添加要加速的网站",font=("Segoe UI",13,"bold")).pack(anchor="w")
+        ttk.Label(f,text="添加要加速的网站",font=FONTS["h3"]).pack(anchor="w")
         ttk.Label(f,text="粘贴网址（或直接填域名），自动生成分流配置并出现在主界面列表；只保存在本机，不会上传。",
                   wraplength=600).pack(anchor="w",pady=(4,8))
 
@@ -792,9 +972,9 @@ class CustomSitesWindow(tk.Toplevel):
         ttk.Label(form,text="名称(可选)").pack(side="left")
         self.name_var=tk.StringVar()
         ttk.Entry(form,textvariable=self.name_var,width=16).pack(side="left",padx=(8,12))
-        ttk.Button(form,text="添加",command=self.add_site).pack(side="left")
+        ttk.Button(form,text="添加",style="Accent.TButton",command=self.add_site).pack(side="left")
 
-        ttk.Label(f,text="我的加速网站：",font=("Segoe UI",10,"bold")).pack(anchor="w",pady=(14,4))
+        ttk.Label(f,text="我的加速网站：",font=FONTS["ui_b"]).pack(anchor="w",pady=(14,4))
         self.listf=ttk.Frame(f); self.listf.pack(fill="both",expand=True)
         self.refresh_list()
 
@@ -861,18 +1041,20 @@ class CustomProfilesWindow(tk.Toplevel):
     }
     def __init__(self,master,on_saved):
         super().__init__(master)
-        self.title("FLY - 本地自定义配置"); self.geometry("780x650")
+        self.title("FLY - 本地自定义配置"); self.geometry("780x650"); style_toplevel(self)
         self.on_saved=on_saved
         f=ttk.Frame(self,padding=12); f.pack(fill="both",expand=True)
-        ttk.Label(f,text="本地 JSON 配置编辑器",font=("Segoe UI",13,"bold")).pack(anchor="w")
+        ttk.Label(f,text="本地 JSON 配置编辑器",font=FONTS["h3"]).pack(anchor="w")
         ttk.Label(f,text="内容保存在 private\\custom_profiles.json，永远不会被提交。domains / processes / ip_cidrs / ports 只写你明确要代理的流量；注意 ports 是全系统级按端口匹配（如填 443 等于全部 HTTPS），请谨慎使用。",wraplength=740).pack(anchor="w",pady=(4,8))
-        self.text=tk.Text(f,wrap="none",font=("Consolas",10))
+        self.text=tk.Text(f,wrap="none",font=FONTS["mono"],relief="flat",bd=0,bg=C["card"],
+                          highlightthickness=1,highlightbackground=C["border"],highlightcolor=C["accent"],
+                          padx=10,pady=8)
         self.text.pack(fill="both",expand=True)
         current={"profiles":[{k:v for k,v in p.items() if k not in ("source","invalid_values")} for p in load_custom_profiles(PATHS)]}
         if not current["profiles"]: current=self.TEMPLATE
         self.text.insert("1.0",json.dumps(current,ensure_ascii=False,indent=2))
         row=ttk.Frame(f); row.pack(fill="x",pady=(8,0))
-        ttk.Button(row,text="保存本地配置",command=self.save).pack(side="right")
+        ttk.Button(row,text="保存本地配置",style="Accent.TButton",command=self.save).pack(side="right")
 
     def save(self):
         try:
