@@ -151,7 +151,7 @@ class JapanNodeSelector:
     def __init__(self, api, log, keywords=None, test_urls=None, required_urls=None,
                  test_url="https://www.gstatic.com/generate_204", timeout_ms=5000,
                  light_url="https://www.gstatic.com/generate_204",
-                 cancel_event=None, total_timeout_s=35):
+                 cancel_event=None, total_timeout_s=35, optional_urls=None):
         self.api, self.log = api, log
         self.keywords = keywords
         source = required_urls if required_urls is not None else test_urls
@@ -160,6 +160,12 @@ class JapanNodeSelector:
         self.light_url = str(light_url or test_url or "https://www.gstatic.com/generate_204").strip()
         self.test_urls = self.required_urls or [self.light_url]
         self.test_url = self.test_urls[0]
+        # 用户自己添加的网站：首页是否响应测速请求不可控（只支持 http、慢、
+        # 屏蔽探测……）。这类目标只用来给节点排序，测不通不会让节点判为不可用，
+        # 否则一个不响应探测的首页就能让加速永远无法启动。
+        self.optional_urls = [u for u in dict.fromkeys(
+            str(x).strip() for x in (optional_urls or []) if str(x).strip())
+            if u not in self.test_urls]
         self.timeout_ms = max(1000, min(30000, int(timeout_ms)))
         self.cancel_event = cancel_event
         self.total_timeout_s = max(5, int(total_timeout_s))
@@ -214,6 +220,10 @@ class JapanNodeSelector:
         The generic gstatic endpoint is used only when no profile supplied a
         service-specific latency target.
         """
+        return self.measure_detail(node)[0]
+
+    def measure_detail(self, node):
+        """Return (delay, failed_optional_urls); required targets raise on failure."""
         self._check_cancelled()
         urls = self.required_urls or [self.light_url]
         delays = []
@@ -225,7 +235,18 @@ class JapanNodeSelector:
                 raise MihomoApiError(f"{url}: {e}") from e
         if not delays:
             raise MihomoApiError("No latency target")
-        return max(delays)
+        missed = []
+        for url in self.optional_urls:
+            self._check_cancelled()
+            try:
+                delays.append(self.api.delay(node, url, self.timeout_ms))
+            except MihomoApiError as e:
+                if self._cancelled():
+                    raise
+                missed.append(url)
+            except Exception:
+                missed.append(url)
+        return max(delays), missed
 
     def measure_light(self, node):
         # Keep watchdog/sticky service-aware. A target service being blocked is
@@ -234,7 +255,8 @@ class JapanNodeSelector:
 
     def _measure(self, node):
         try:
-            return node, self.measure(node), None
+            delay, missed = self.measure_detail(node)
+            return node, delay, missed
         except Exception as e:
             return node, None, str(e)
 
@@ -254,16 +276,20 @@ class JapanNodeSelector:
 
         if preferred and preferred in nodes:
             try:
-                d = self.measure(preferred)
-                if d <= int(sticky_max_delay_ms):
+                d, missed = self.measure_detail(preferred)
+                if missed:
+                    self.log("[JP] Last node did not answer the custom site probe; re-selecting.")
+                elif d <= int(sticky_max_delay_ms):
                     self._commit_selection(preferred, group)
                     self.log(f"[JP STICKY] {preferred} ({d} ms) — verified against selected service.")
                     return preferred, d
-                self.log(f"[JP] Last node degraded ({d} ms > {sticky_max_delay_ms} ms); re-selecting.")
+                else:
+                    self.log(f"[JP] Last node degraded ({d} ms > {sticky_max_delay_ms} ms); re-selecting.")
             except Exception as e:
                 self.log(f"[JP] Last node unavailable ({e}); re-selecting.")
 
-        self.log(f"[JP] Found {len(nodes)} Japan candidate(s); testing {len(self.test_urls)} required target(s).")
+        extra = f" + {len(self.optional_urls)} custom-site target(s)" if self.optional_urls else ""
+        self.log(f"[JP] Found {len(nodes)} Japan candidate(s); testing {len(self.test_urls)} required target(s){extra}.")
         results = []
         jobs = queue.Queue()
         output = queue.Queue()
@@ -295,19 +321,24 @@ class JapanNodeSelector:
                 continue
             completed += 1
             if d is not None:
-                self.log(f"[JP TEST {completed}/{len(nodes)}] {n}: {d} ms")
+                note = f" (custom site probe failed: {len(err)})" if err else ""
+                self.log(f"[JP TEST {completed}/{len(nodes)}] {n}: {d} ms{note}")
+                results.append((n, d, len(err)))
             else:
                 self.log(f"[JP TEST {completed}/{len(nodes)}] {n}: unavailable ({err})")
-            results.append((n, d))
         if completed < len(nodes):
             self.log(f"[JP] 测速总时限 {self.total_timeout_s}s 已到；剩余探测线程将作为 daemon 自行结束。")
 
         self._check_cancelled()
-        healthy = sorted([(n,d) for n,d in results if d is not None], key=lambda x:x[1])
+        # 先比“自定义网站测速通过几个”，再比延迟。
+        healthy = sorted(results, key=lambda x: (x[2], x[1]))
         if not healthy:
             raise MihomoApiError("没有任何通过所选服务健康检查的日本节点；保持加速未启动。")
 
-        chosen, delay = healthy[0]
+        chosen, delay, missed = healthy[0]
+        if missed:
+            self.log("[JP] 自定义网站的首页在所有日本节点上都没有响应测速请求，已按其余目标选线。"
+                     "加速照常生效；如果该网站仍打不开，请检查网址是否填对，或换个节点试试。")
         self._commit_selection(chosen, group)
         self.log(f"[JP SELECT] {chosen} ({delay} ms)")
         return chosen, delay

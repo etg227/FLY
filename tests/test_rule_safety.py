@@ -2,7 +2,7 @@
 import shutil, tempfile, unittest
 from pathlib import Path
 
-from backend.config import Paths, ensure_private_files, save_custom_profiles, save_json
+from backend.config import Paths, ensure_private_files, profile_from_url, save_custom_profiles, save_json
 from backend.mihomo_config import build_runtime_config
 
 INJECTIONS=[
@@ -47,6 +47,19 @@ class RoutingTests(unittest.TestCase):
         self.assertIn("- IP-CIDR6,2001:db8::/32,FLY-JP,no-resolve",rules)
         self.assertIn("- IP-CIDR,192.168.0.0/16,DIRECT,no-resolve",rules)
         self.assertEqual(rules[-1],"- MATCH,DIRECT")
+
+    def test_site_added_by_ip_routes_by_ip_not_domain(self):
+        # DOMAIN-SUFFIX,203.0.113.7 never matches an IP connection.
+        rules=self._rules(profile_from_url("http://203.0.113.7:8080/game"))
+        self.assertIn("- IP-CIDR,203.0.113.7/32,FLY-JP,no-resolve",rules)
+        self.assertFalse(any("DOMAIN-SUFFIX,203.0.113.7" in x for x in rules))
+        self.assertEqual(rules[-1],"- MATCH,DIRECT")
+
+    def test_ip_saved_as_domain_by_old_version_is_migrated(self):
+        rules=self._rules({"id":"old","name":"old","domains":["203.0.113.7","old.jp"]})
+        self.assertIn("- IP-CIDR,203.0.113.7/32,FLY-JP,no-resolve",rules)
+        self.assertIn("- DOMAIN-SUFFIX,old.jp,FLY-JP",rules)
+        self.assertFalse(any("DOMAIN-SUFFIX,203.0.113.7" in x for x in rules))
 
     def test_empty_profile_is_rejected(self):
         save_custom_profiles(self.p,[{"id":"empty","name":"Empty"}])

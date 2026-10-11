@@ -549,19 +549,29 @@ class FlyApp:
                 last=None
 
     def latency_targets(self, selected):
-        urls=[]
+        """返回 (必须通过的测速地址, 仅用于排序的测速地址)。
+
+        内置配置的测速地址经过挑选，必须通过；用户自己添加的网站首页不一定
+        响应测速请求，只用来优先挑能打开它的节点，不能因此拒绝启动加速。
+        """
+        required, optional = [], []
         for pid in selected:
             p=self.profile_by_id.get(pid, {})
-            urls.extend(p.get("latency_test_urls",[]))
-        return list(dict.fromkeys(u for u in urls if u))
+            target = optional if p.get("source")=="custom" else required
+            target.extend(p.get("latency_test_urls",[]))
+        required = list(dict.fromkeys(u for u in required if u))
+        optional = [u for u in dict.fromkeys(u for u in optional if u) if u not in required]
+        return required, optional
 
     def make_selector(self, selected=None):
         s=load_app_settings(PATHS)
+        required, optional = self.latency_targets(selected or self.selected_profiles())
         return JapanNodeSelector(
             MihomoApi(int(s["controller_port"]), s["api_secret"]),
             self.log,
             keywords=s["jp_keywords"],
-            required_urls=self.latency_targets(selected or self.selected_profiles()),
+            required_urls=required,
+            optional_urls=optional,
             timeout_ms=int(s["latency_timeout_ms"]),
             light_url=s["latency_test_url"],
             cancel_event=self._start_cancel,

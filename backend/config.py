@@ -369,6 +369,19 @@ def _normalize_profile(rule, source="builtin"):
         cleaned, bad = _clean_rule_values(key, r.get(key, []))
         r[key] = cleaned
         dropped += [f"{key}={x!r}" for x in bad]
+    # 旧版“添加网站”把 IP 网址写进了 domains，DOMAIN-SUFFIX 匹配不到 IP 连接；
+    # 读取时转成 IP-CIDR，已保存的配置不用重新添加。
+    domains, moved = [], []
+    for d in r["domains"]:
+        try:
+            ip = ipaddress.ip_address(d)
+        except ValueError:
+            domains.append(d)
+        else:
+            moved.append(f"{ip.compressed}/{ip.max_prefixlen}")
+    if moved:
+        r["domains"] = domains
+        r["ip_cidrs"] = list(dict.fromkeys(r["ip_cidrs"] + moved))
 
     latency = []
     for x in _as_list(r.get("latency_test_urls", [])):
@@ -482,12 +495,36 @@ def profile_from_url(raw_url, name=""):
     if "://" not in raw:
         raw = "https://" + raw
     parsed = urlparse(raw)
-    if parsed.scheme.lower() not in ("http", "https"):
+    scheme = parsed.scheme.lower()
+    if scheme not in ("http", "https"):
         raise ValueError("只支持 http:// 或 https:// 网站。")
-    host = _idna_host(parsed.hostname or "")
-    if not host or "." not in host:
-        raise ValueError("无法从输入中解析出有效域名。")
-    domain = registrable_domain(host)
+    try:
+        port = parsed.port
+    except ValueError:
+        raise ValueError("网址中的端口无效。") from None
+    raw_host = (parsed.hostname or "").strip().strip(".")
+    try:
+        ip = ipaddress.ip_address(raw_host)
+    except ValueError:
+        ip = None
+    if ip is not None:
+        # 直接填 IP 的网站：DOMAIN-SUFFIX 匹配不到 IP 连接，必须用 IP-CIDR。
+        host = ip.compressed
+        domain = host
+        netloc = f"[{host}]" if ip.version == 6 else host
+        domains, cidrs = [], [f"{host}/{ip.max_prefixlen}"]
+    else:
+        host = _idna_host(raw_host)
+        if not host or "." not in host:
+            raise ValueError("无法从输入中解析出有效域名。")
+        domain = registrable_domain(host)
+        netloc = host
+        domains, cidrs = [domain], []
+    if port is not None:
+        netloc += f":{port}"
+    # 测速地址必须和用户填的协议/端口一致：只支持 http 的站点被强行改成
+    # https、或端口被丢掉时，所有节点都会“测速失败”，导致无法启动加速。
+    site_url = f"{scheme}://{netloc}/"
     slug = re.sub(r"[^a-z0-9]+", "-", domain).strip("-")
     digest = hashlib.sha256(domain.encode("utf-8")).hexdigest()[:12]
     if not slug:
@@ -502,13 +539,13 @@ def profile_from_url(raw_url, name=""):
         "name": display or domain,
         "category": "Custom",
         "launch_mode": "browser",
-        "url": f"https://{host}/",
-        "domains": [domain],
+        "url": site_url,
+        "domains": domains,
         "keywords": [],
-        "ip_cidrs": [],
+        "ip_cidrs": cidrs,
         "processes": [],
         "ports": [],
-        "latency_test_urls": [f"https://{host}/"],
+        "latency_test_urls": [site_url],
     }
 
 def list_routing_profiles(paths):

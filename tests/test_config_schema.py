@@ -116,6 +116,29 @@ class CustomUrlTests(unittest.TestCase):
         self.assertTrue(p["domains"][0].startswith("xn--"))
         self.assertIn("xn--", p["url"])
 
+    def test_probe_keeps_scheme_and_port(self):
+        # Forcing https / dropping the port made every node fail the probe,
+        # so an http-only or non-443 site could never be accelerated.
+        p=profile_from_url("http://oldsite.jp/")
+        self.assertEqual(p["latency_test_urls"],["http://oldsite.jp/"])
+        self.assertEqual(p["url"],"http://oldsite.jp/")
+        p=profile_from_url("https://www.example.jp:8443/game")
+        self.assertEqual(p["latency_test_urls"],["https://www.example.jp:8443/"])
+        self.assertEqual(p["domains"],["example.jp"])
+
+    def test_ip_site_uses_ip_cidr(self):
+        p=profile_from_url("203.0.113.7:8080")
+        self.assertEqual((p["domains"],p["ip_cidrs"]),([],["203.0.113.7/32"]))
+        self.assertEqual(p["latency_test_urls"],["https://203.0.113.7:8080/"])
+        p=profile_from_url("http://[2001:db8::1]:8080/")
+        self.assertEqual(p["ip_cidrs"],["2001:db8::1/128"])
+        self.assertEqual(p["latency_test_urls"],["http://[2001:db8::1]:8080/"])
+        self.assertEqual(validate_profile(p),[])
+
+    def test_invalid_port_is_rejected(self):
+        with self.assertRaises(ValueError):
+            profile_from_url("https://example.jp:99999/")
+
     def test_shared_host_is_not_widened(self):
         self.assertEqual(registrable_domain("user.github.io"), "user.github.io")
         self.assertEqual(registrable_domain("foo.pages.dev"), "foo.pages.dev")
