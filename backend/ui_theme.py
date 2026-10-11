@@ -4,6 +4,7 @@
 """
 from __future__ import annotations
 import math
+import time
 import tkinter as tk
 from tkinter import ttk, font as tkfont
 
@@ -128,6 +129,96 @@ def _mix(c1, c2, t):
     return "#%02x%02x%02x" % tuple(round(x + (y - x) * t) for x, y in zip(a, b))
 
 
+# ---- 动画 ---------------------------------------------------------------
+# tkinter 没有动画系统，这里用 after() 逐帧重画。每个控件的动画按名字区分，
+# 同名动画重新开始时会取消旧的；控件销毁时自动取消，避免回调打到已销毁的控件。
+
+ANIMATIONS = True
+FRAME_MS = 16
+
+
+def ease_out(t):
+    return 1 - (1 - t) ** 3
+
+
+def _jobs(widget):
+    jobs = widget.__dict__.get("_anim_jobs")
+    if jobs is None:
+        jobs = widget.__dict__["_anim_jobs"] = {}
+
+        def cancel_all(e):
+            # 销毁过程中 e.widget 可能只是路径字符串，所以按路径比较
+            if str(e.widget) == str(widget):
+                for job in list(jobs.values()):
+                    try: widget.after_cancel(job)
+                    except tk.TclError: pass
+                jobs.clear()
+        widget.bind("<Destroy>", cancel_all, add="+")
+    return jobs
+
+
+def stop_anim(widget, name):
+    job = _jobs(widget).pop(name, None)
+    if job:
+        try: widget.after_cancel(job)
+        except tk.TclError: pass
+
+
+def animate(widget, name, duration, step, done=None, ease=ease_out):
+    """在 duration 毫秒内以 step(progress) 逐帧推进，progress 已经过缓动，从 0 到 1。"""
+    stop_anim(widget, name)
+    jobs = _jobs(widget)
+    if not ANIMATIONS or duration <= 0:
+        step(1.0)
+        if done: done()
+        return
+    start = time.perf_counter()
+
+    def tick():
+        jobs.pop(name, None)
+        try:
+            t = min(1.0, (time.perf_counter() - start) * 1000 / duration)
+            step(ease(t))
+            if t < 1.0:
+                jobs[name] = widget.after(FRAME_MS, tick)
+            elif done:
+                done()
+        except tk.TclError:
+            pass
+    tick()
+
+
+def loop(widget, name, step, interval=33):
+    """持续动画：step(已运行秒数)，直到 stop_anim(widget, name)。"""
+    stop_anim(widget, name)
+    jobs = _jobs(widget)
+    start = time.perf_counter()
+
+    def tick():
+        jobs.pop(name, None)
+        try:
+            step(time.perf_counter() - start)
+            jobs[name] = widget.after(interval, tick)
+        except tk.TclError:
+            pass
+    tick()
+
+
+def tween_color(widget, name, src, dst, duration, apply):
+    """颜色渐变：apply(color) 每帧被调用。"""
+    if src == dst:
+        apply(dst); stop_anim(widget, name); return
+    animate(widget, name, duration, lambda t: apply(_mix(src, dst, t)))
+
+
+def slide_in(frame, distance=40, duration=220):
+    """页面从右侧滑入（tkinter 控件不支持半透明，所以用位移代替淡入）。"""
+    frame.place(x=distance, y=0, relwidth=1, relheight=1)
+    frame.tkraise()
+    animate(frame, "slide", duration,
+            lambda t: frame.place_configure(x=round(distance * (1 - t))))
+
+
 # ---- 圆角卡片 -----------------------------------------------------------
 
 class Card(tk.Frame):
@@ -155,6 +246,13 @@ class Card(tk.Frame):
         if outline:
             self.outline = outline
         self._redraw()
+
+    def fade_to(self, fill, outline, duration=140):
+        f0, o0 = self.fill, self.outline
+        if (f0, o0) == (fill, outline):
+            return
+        animate(self, "colors", duration,
+                lambda t: self.set_colors(fill=_mix(f0, fill, t), outline=_mix(o0, outline, t)))
 
     def _redraw(self, _e=None):
         cv = self._canvas
@@ -185,7 +283,10 @@ def _recolor(widget, color):
 # ---- 圆角按钮 -----------------------------------------------------------
 
 class RoundButton(tk.Canvas):
-    """自绘圆角按钮，兼容 .configure(state=..., text=...)，可选副标题（BakaXL 式大启动按钮）。"""
+    """自绘圆角按钮，兼容 .configure(state=..., text=...)，可选副标题（BakaXL 式大启动按钮）。
+
+    busy=True 时禁用态显示为“进行中”：转圈图标 + （主按钮）流光，副标题换成 busy_text。
+    """
 
     KINDS = {
         "accent":    (C["accent"], C["accent_hi"], C["accent_lo"], "#FFFFFF", "#DCE3F5"),
@@ -195,17 +296,21 @@ class RoundButton(tk.Canvas):
     }
 
     def __init__(self, master, text="", command=None, kind="secondary", icon=None,
-                 subtitle=None, width=120, height=38, radius=10, font=None, **kw):
+                 subtitle=None, width=120, height=38, radius=10, font=None, busy=False, **kw):
         bg = kw.pop("bg", None) or _bg_of(master)
         super().__init__(master, bg=bg, width=width, height=height,
                          highlightthickness=0, bd=0, cursor="hand2", **kw)
         self._text, self._icon, self._subtitle = text, icon, subtitle
+        self._busy_text = None
         self._command = command
         self._kind = kind
         self._radius = radius
         self._font = font or FONTS["ui_b"]
         self._state = "normal"
+        self._busy_capable = busy
+        self._phase = 0.0
         self._hover = self._press = False
+        self._fill = self._target_fill()
         self.bind("<Configure>", lambda e: self._draw())
         self.bind("<Enter>", lambda e: self._set(hover=True))
         self.bind("<Leave>", lambda e: self._set(hover=False, press=False))
@@ -213,10 +318,28 @@ class RoundButton(tk.Canvas):
         self.bind("<ButtonRelease-1>", self._release)
         self._draw()
 
+    @property
+    def _busy(self):
+        return self._busy_capable and self._state == "disabled"
+
+    def _target_fill(self):
+        base, hover, press, fg, disabled = self.KINDS[self._kind]
+        if self._busy:
+            return _mix(base, C["bg"], .3) if self._kind == "accent" else base
+        if self._state == "disabled":
+            return disabled
+        return press if self._press else hover if self._hover else base
+
     def _set(self, hover=None, press=None):
         if hover is not None: self._hover = hover
         if press is not None: self._press = press
-        self._draw()
+        self._fade(60 if self._press else 140)
+
+    def _fade(self, duration):
+        def apply(color):
+            self._fill = color
+            self._draw()
+        tween_color(self, "fill", self._fill, self._target_fill(), duration, apply)
 
     def _release(self, e):
         fire = self._press and self._hover and self._state != "disabled"
@@ -224,32 +347,56 @@ class RoundButton(tk.Canvas):
         if fire and self._command:
             self._command()
 
+    def _tick(self, elapsed):
+        self._phase = elapsed
+        self._draw()
+
     def _draw(self):
         base, hover, press, fg, disabled = self.KINDS[self._kind]
         w, h = self.winfo_width(), self.winfo_height()
         if w <= 1:
             w, h = int(self.cget("width")), int(self.cget("height"))
-        off = self._state == "disabled"
-        fill = disabled if off else press if self._press else hover if self._hover else base
+        busy = self._busy
+        off = self._state == "disabled" and not busy
+        fill = self._fill
         color = C["muted"] if off else fg
         self.delete("all")
-        outline = "" if self._kind in ("accent", "ghost") else C["border"]
-        if self._kind == "accent" and not off:
+        raised = self._kind == "accent" and not off
+        if raised:
             rounded_rect(self, 2, 4, w - 2, h, self._radius, fill=_mix(C["accent"], C["bg"], .55), outline="")
             rounded_rect(self, 1, 1, w - 1, h - 3, self._radius, fill=fill, outline="")
         else:
+            outline = "" if self._kind == "ghost" else C["border"]
             rounded_rect(self, 1, 1, w - 1, h - 1, self._radius, fill=fill, outline=outline)
-        cy = (h - 3) / 2 if self._kind == "accent" else h / 2
+        bottom = h - 3 if raised else h - 1
+        if busy and self._kind == "accent":
+            # 流光：一条斜向亮带从左往右扫过，只在圆角之间的直边区域内绘制
+            r = self._radius
+            span = w - 2 * r
+            band = max(24, w // 6)
+            x = r + ((self._phase * 0.9) % 1.0) * (span + band) - band
+            x0, x1 = max(r, x), min(w - r, x + band)
+            if x1 - x0 > 12:
+                self.create_polygon(x0 + 10, 1, x1, 1, x1 - 10, bottom, x0, bottom,
+                                    fill=_mix(fill, "#FFFFFF", .18), outline="")
+        cy = (h - 3) / 2 if raised else h / 2
         label = self._text
-        if self._subtitle:
+        sub = (self._busy_text or self._subtitle) if busy else self._subtitle
+        ft = tkfont.Font(font=self._font)
+        if busy:
+            sr = 8 if sub else 7
+            tw = ft.measure(label)
+            sx = (w - tw) / 2 - sr - 10
+            sy = cy - 9 if sub else cy
+            self.create_arc(sx - sr, sy - sr, sx + sr, sy + sr, start=-self._phase * 360, extent=270,
+                            style="arc", outline=color, width=2)
+        if sub:
             self.create_text(w / 2, cy - 9, text=label, fill=color, font=self._font)
-            self.create_text(w / 2, cy + 13, text=self._subtitle, fill=color if off else _mix(color, fill, .25),
+            self.create_text(w / 2, cy + 13, text=sub, fill=color if off else _mix(color, fill, .25),
                              font=FONTS["small"], width=w - 20)
-        elif self._icon:
-            ft = tkfont.Font(font=self._font)
+        elif self._icon and not busy:
             iw = 22
-            total = iw + ft.measure(label)
-            x0 = (w - total) / 2
+            x0 = (w - iw - ft.measure(label)) / 2
             self.create_text(x0 + iw / 2 - 2, cy, text=ICONS.get(self._icon, ""), fill=color, font=FONTS["icon_s"])
             self.create_text(x0 + iw, cy, text=label, fill=color, font=self._font, anchor="w")
         else:
@@ -259,19 +406,24 @@ class RoundButton(tk.Canvas):
         if cnf:
             kw.update(cnf)
         changed = False
-        for key, attr in (("state", "_state"), ("text", "_text"),
-                          ("subtitle", "_subtitle"), ("command", "_command")):
+        old_state = self._state
+        for key, attr in (("state", "_state"), ("text", "_text"), ("subtitle", "_subtitle"),
+                          ("busy_text", "_busy_text"), ("command", "_command")):
             if key in kw:
                 setattr(self, attr, kw.pop(key)); changed = True
         result = super().configure(**kw) if kw else None
         if changed:
-            self.configure_cursor()
-            self._draw()
+            if self._state != old_state:
+                super().configure(cursor="arrow" if self._state == "disabled" else "hand2")
+                if self._busy:
+                    loop(self, "busy", self._tick)
+                else:
+                    stop_anim(self, "busy")
+                self._fade(160)
+            else:
+                self._draw()
         return result
     config = configure
-
-    def configure_cursor(self):
-        super().configure(cursor="arrow" if self._state == "disabled" else "hand2")
 
     def cget(self, key):
         if key == "state": return self._state
@@ -320,7 +472,23 @@ class StatusPill(tk.Canvas):
         self.delete("all")
         fill = "#FFFFFF" if self.on_dark else _mix(color, "#FFFFFF", .86)
         rounded_rect(self, 1, 1, w - 1, 29, 14, fill=fill, outline="")
-        self.create_oval(13, 11, 21, 19, fill=color, outline="")
+        halo = self.create_oval(17, 15, 17, 15, outline="", fill="")
+        dot = self.create_oval(13, 11, 21, 19, fill=color, outline="")
+        # 加速中：慢速呼吸 + 扩散光圈；进行中（启动/检测等）：快速闪烁；其余静止
+        if color in (C["ok"], C["warn"]):
+            period = 1.8 if color == C["ok"] else 0.8
+
+            def pulse(elapsed):
+                k = (elapsed % period) / period
+                if color == C["ok"]:
+                    r = 4 + 7 * k
+                    self.coords(halo, 17 - r, 15 - r, 17 + r, 15 + r)
+                    self.itemconfigure(halo, fill=_mix(color, fill, .45 + .55 * k))
+                else:
+                    self.itemconfigure(dot, fill=_mix(color, fill, .6 * (0.5 + 0.5 * math.cos(k * 2 * math.pi))))
+            loop(self, "pulse", pulse, 33)
+        else:
+            stop_anim(self, "pulse")
         self.create_text(28, 15, text=text, anchor="w", font=FONTS["ui_b"],
                          fill=C["text"] if self.on_dark else _mix(color, "#000000", .25))
 
@@ -404,11 +572,17 @@ class NavItem(tk.Frame):
     def _paint(self, hover):
         bg = C["nav_sel"] if self.selected else C["nav_hi"] if hover else C["nav"]
         fg = C["nav_text_sel"] if self.selected or hover else C["nav_text"]
-        for w in (self, self.ic, self.lb):
-            w.configure(bg=bg)
         self.ic.configure(fg=C["accent_hi"] if self.selected else fg)
         self.lb.configure(fg=fg, font=FONTS["ui_b"] if self.selected else FONTS["ui"])
-        self.bar.configure(bg=C["accent"] if self.selected else bg)
+
+        def apply(color):
+            for w in (self, self.ic, self.lb):
+                w.configure(bg=color)
+            self.bar.configure(bg=C["accent"] if self.selected else color)
+        tween_color(self, "bg", self.cget("bg"), bg, 150, apply)
+        if self.selected:
+            # 选中指示条从中间“长”出来
+            animate(self.bar, "grow", 200, lambda t: self.bar.configure(height=max(2, round(22 * t))))
 
 
 # ---- 开关 ---------------------------------------------------------------
@@ -427,7 +601,8 @@ class SwitchRow(tk.Frame):
         self.lb.pack(side="left", fill="x", expand=True)
         for w in (self, self.sw, self.lb):
             w.bind("<Button-1>", self._toggle)
-        self._trace = variable.trace_add("write", lambda *_: self._draw())
+        self._pos = 1.0 if variable.get() else 0.0
+        self._trace = variable.trace_add("write", lambda *_: self._slide())
         self.bind("<Destroy>", self._untrace, add="+")
         self._draw()
 
@@ -441,15 +616,23 @@ class SwitchRow(tk.Frame):
         if self.command:
             self.command()
 
-    def _draw(self):
+    def _slide(self):
         try:
-            on = bool(self.var.get())
+            target = 1.0 if self.var.get() else 0.0
         except tk.TclError:
             return
-        cv = self.sw
+        start = self._pos
+
+        def step(t):
+            self._pos = start + (target - start) * t
+            self._draw()
+        animate(self.sw, "slide", 180, step)
+
+    def _draw(self):
+        cv, p = self.sw, self._pos
         cv.delete("all")
-        rounded_rect(cv, 1, 1, 39, 21, 10, fill=C["accent"] if on else C["border"], outline="")
-        x = 29 if on else 11
+        rounded_rect(cv, 1, 1, 39, 21, 10, fill=_mix(C["border"], C["accent"], p), outline="")
+        x = 11 + 18 * p
         cv.create_oval(x - 7, 4, x + 7, 18, fill="#FFFFFF", outline="")
 
     def configure(self, cnf=None, **kw):
@@ -491,10 +674,11 @@ class ProfileTile(Card):
             chip = tk.Label(chips, text=tag, font=FONTS["small"], bg=C["accent_bg"], fg=C["accent_lo"], padx=6)
             chip._follow_card = False
             chip.pack(side="left", padx=(0, 6))
+        self._hover = False
         self._trace = variable.trace_add("write", lambda *_: self._paint())
         self.bind("<Destroy>", self._untrace, add="+")
         self._bind_all(self)
-        self._paint()
+        self._paint(instant=True)
 
     def _untrace(self, e):
         if e.widget is self:
@@ -503,6 +687,8 @@ class ProfileTile(Card):
 
     def _bind_all(self, w):
         w.bind("<Button-1>", self._toggle, add="+")
+        w.bind("<Enter>", lambda e: self._set_hover(True), add="+")
+        w.bind("<Leave>", lambda e: self.after(10, self._check_leave), add="+")
         w.configure(cursor="hand2")
         for child in w.winfo_children():
             self._bind_all(child)
@@ -510,14 +696,36 @@ class ProfileTile(Card):
     def _toggle(self, _e=None):
         self.var.set(not self.var.get())
 
-    def _paint(self):
+    def set_colors(self, fill=None, outline=None):
+        super().set_colors(fill=fill, outline=outline)
+        self.box.configure(bg=self.fill)
+
+    def _set_hover(self, value):
+        if value != self._hover:
+            self._hover = value
+            self._paint()
+
+    def _check_leave(self):
+        # 在卡片内部的子控件之间移动也会触发 <Leave>，以指针实际位置为准
+        try:
+            under = self.winfo_containing(*self.winfo_pointerxy())
+        except (tk.TclError, KeyError):
+            under = None
+        me = str(self)
+        if under is None or not (str(under) == me or str(under).startswith(me + ".")):
+            self._set_hover(False)
+
+    def _paint(self, instant=False):
         try:
             on = bool(self.var.get())
         except tk.TclError:
             return
-        self.set_colors(fill=C["accent_bg"] if on else C["card"],
-                        outline=C["accent"] if on else C["border"])
-        self.box.configure(bg=self.fill)
+        fill = C["accent_bg"] if on else C["card_alt"] if self._hover else C["card"]
+        outline = C["accent"] if on else C["accent_hi"] if self._hover else C["border"]
+        if instant:
+            self.set_colors(fill=fill, outline=outline)
+        else:
+            self.fade_to(fill, outline)
         self.box.delete("all")
         if on:
             rounded_rect(self.box, 1, 1, 21, 21, 6, fill=C["accent"], outline="")

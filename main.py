@@ -25,7 +25,7 @@ from backend.self_update import schedule_launcher_replace
 from backend.windows_admin import is_admin
 from backend.ui_theme import (
     C, FONTS, ICONS, Card, Hero, NavItem, ProfileTile, RoundButton, StatusPill, SwitchRow,
-    apply_theme, autohide, rounded_rect, style_toplevel,
+    apply_theme, autohide, rounded_rect, slide_in, style_toplevel,
 )
 
 APP_DIR = Path(__file__).resolve().parent
@@ -157,10 +157,9 @@ class FlyApp:
         # ---- 页面容器 ----
         host = tk.Frame(shell, bg=C["bg"]); host.pack(side="left", fill="both", expand=True)
         self.pages = {}
+        self._page = None
         for key in self.nav_items:
-            page = tk.Frame(host, bg=C["bg"], padx=24, pady=22)
-            page.place(relx=0, rely=0, relwidth=1, relheight=1)
-            self.pages[key] = page
+            self.pages[key] = tk.Frame(host, bg=C["bg"], padx=24, pady=22)
         self._build_home(self.pages["home"])
         self._build_profiles(self.pages["profiles"])
         self._build_log(self.pages["log"])
@@ -168,7 +167,17 @@ class FlyApp:
         self.show_page("home")
 
     def show_page(self, key):
-        self.pages[key].tkraise()
+        if key == self._page:
+            return
+        first = self._page is None
+        self._page = key
+        for k, page in self.pages.items():
+            if k != key:
+                page.place_forget()
+        if first:
+            self.pages[key].place(x=0, y=0, relwidth=1, relheight=1)
+        else:
+            slide_in(self.pages[key])
         for k, item in self.nav_items.items():
             item.set_selected(k == key)
 
@@ -205,13 +214,16 @@ class FlyApp:
         # 底部操作栏（BakaXL 式：左侧次要操作，右侧大启动按钮）
         bar = tk.Frame(page, bg=C["bg"]); bar.pack(side="bottom", fill="x", pady=(16, 0))
         self.start_btn = RoundButton(bar, text="一键加速", subtitle="", command=self.start_accel,
-                                     kind="accent", width=240, height=66, radius=14, font=FONTS["big"])
+                                     kind="accent", width=240, height=66, radius=14, font=FONTS["big"],
+                                     busy=True)
+        # 启动过程中按钮显示转圈 + 流光，副标题实时显示当前步骤
+        self.status_var.trace_add("write", lambda *_: self.start_btn.configure(busy_text=self.status_var.get()))
         self.start_btn.pack(side="right")
         left = tk.Frame(bar, bg=C["bg"]); left.pack(side="left", fill="y")
         RoundButton(left, text="停止", icon="stop", kind="danger", command=self.stop_accel,
                     width=96, height=40).pack(side="left", pady=(14, 0))
         self.switch_btn = RoundButton(left, text="换日本节点", icon="swap", command=self.switch_node,
-                                      width=132, height=40)
+                                      width=132, height=40, busy=True)
         self.switch_btn.pack(side="left", padx=(10, 0), pady=(14, 0))
         RoundButton(left, text="刷新状态", icon="refresh", command=self.refresh_status,
                     width=118, height=40).pack(side="left", padx=(10, 0), pady=(14, 0))
