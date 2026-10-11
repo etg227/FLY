@@ -7,12 +7,15 @@ from urllib.parse import urlparse
 @dataclass
 class Paths:
     app: Path
+    data: Path | None = None
     @property
-    def core_exe(self): return self.app / "core" / "mihomo.exe"
+    def data_root(self): return self.data if self.data is not None else self.app
     @property
-    def private(self): return self.app / "private"
+    def core_exe(self): return self.data_root / "core" / "mihomo.exe"
     @property
-    def runtime(self): return self.app / "runtime"
+    def private(self): return self.data_root / "private"
+    @property
+    def runtime(self): return self.data_root / "runtime"
     @property
     def rules(self): return self.app / "rules"
     @property

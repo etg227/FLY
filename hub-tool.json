@@ -1,0 +1,8 @@
+{
+  "schema": 1,
+  "id": "fly",
+  "python": "3.12",
+  "script": "main.py",
+  "requires_tk": true,
+  "lifecycle": "file-v1"
+}
