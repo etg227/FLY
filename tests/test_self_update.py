@@ -60,6 +60,32 @@ class ReplaceTests(unittest.TestCase):
         self.assertTrue(schedule_launcher_replace(self.root))
         self.assertEqual((self.root / "launcher.exe").read_bytes(), b"new launcher")
 
+    def test_running_from_the_launcher_itself_defers_to_exit(self):
+        # FLY 主程序就是 launcher.exe --run-main：当场换掉自己的 exe 会让 PyInstaller
+        # 之后的懒加载读到新文件的错误偏移（zlib.error: incorrect header check）。
+        registered = []
+        logs = []
+        with mock.patch.object(self_update.sys, "frozen", True, create=True), \
+             mock.patch.object(self_update.sys, "executable", str(self.root / "launcher.exe")), \
+             mock.patch.object(self_update, "_register_exit", lambda fn, *a: registered.append((fn, a))), \
+             mock.patch.object(self_update, "_deferred", False):
+            self.assertFalse(schedule_launcher_replace(self.root, logs.append))
+            self.assertEqual((self.root / "launcher.exe").read_bytes(), b"old launcher", "运行期间不能换")
+            self.assertEqual(len(registered), 1)
+            self.assertFalse(schedule_launcher_replace(self.root, logs.append))
+            self.assertEqual(len(registered), 1, "同一进程只登记一次")
+            fn, args = registered[0]
+            self.assertTrue(fn(*args))                     # 模拟 FLY 退出
+        self.assertEqual((self.root / "launcher.exe").read_bytes(), b"new launcher")
+        self.assertFalse((self.root / "launcher.exe.new").exists())
+        self.assertTrue(any("退出 FLY 时替换" in x for x in logs))
+
+    def test_frozen_but_running_from_elsewhere_replaces_now(self):
+        with mock.patch.object(self_update.sys, "frozen", True, create=True), \
+             mock.patch.object(self_update.sys, "executable", str(self.root / "other.exe")):
+            self.assertTrue(schedule_launcher_replace(self.root))
+        self.assertEqual((self.root / "launcher.exe").read_bytes(), b"new launcher")
+
     def test_non_windows_is_a_noop(self):
         with mock.patch.object(self_update, "_IS_WINDOWS", False):
             self.assertFalse(schedule_launcher_replace(self.root))

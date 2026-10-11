@@ -1,8 +1,9 @@
 from __future__ import annotations
-import os, time
+import atexit, os, sys, time
 from pathlib import Path
 
 _IS_WINDOWS = os.name == "nt"
+_deferred = False
 
 def _cleanup_old(root: Path):
     """删掉之前替换留下的旧启动器；还在运行的删不掉，下次再试。"""
@@ -30,6 +31,40 @@ def schedule_launcher_replace(root: Path, log=lambda m: None):
     if not _IS_WINDOWS:
         return False
     _cleanup_old(root)
+    if not pending.exists():
+        return False
+    if _running_from(target):
+        # 本进程就是从这个 launcher.exe 跑起来的（--run-main）。PyInstaller 每次
+        # 懒加载模块都会按“路径”重新打开 exe 读内嵌的 PYZ；现在就把文件换掉，
+        # 之后第一个没加载过的模块（如 encodings.idna）就会从新 exe 的错误偏移
+        # 读出乱码：zlib.error: incorrect header check，FLY 直接启动失败。
+        # 所以推迟到 FLY 退出时再换，那时不会再有懒加载。
+        global _deferred
+        if not _deferred:
+            _deferred = True
+            _register_exit(_replace_now, root, lambda m: None)
+        log("[UPDATE] 新版 launcher.exe 已就绪，将在退出 FLY 时替换，下次启动生效。")
+        return False
+    return _replace_now(root, log)
+
+
+def _register_exit(fn, *args):
+    atexit.register(fn, *args)
+
+
+def _running_from(target: Path):
+    if not getattr(sys, "frozen", False):
+        return False
+    try:
+        return (os.path.normcase(os.path.realpath(sys.executable)) ==
+                os.path.normcase(os.path.realpath(str(target))))
+    except (OSError, ValueError):
+        return False
+
+
+def _replace_now(root: Path, log=lambda m: None):
+    pending = root / "launcher.exe.new"
+    target = root / "launcher.exe"
     if not pending.exists():
         return False
     old = root / f"launcher.exe.old.{os.getpid()}.{int(time.time())}"
