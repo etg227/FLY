@@ -5,7 +5,7 @@ Set-Location $ProjectRoot
 py -3 -m pip show pyinstaller *> $null
 if ($LASTEXITCODE -ne 0) {
   Write-Host "Installing PyInstaller..."
-  py -3 -m pip install pyinstaller
+  py -3 -m pip install "pyinstaller>=6.9"
   if ($LASTEXITCODE -ne 0) { throw "pip install pyinstaller failed." }
 }
 

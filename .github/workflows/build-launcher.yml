@@ -18,7 +18,7 @@ jobs:
           python-version: "3.12"
       - name: Build launcher.exe
         run: |
-          pip install pyinstaller
+          pip install "pyinstaller>=6.9"
           pyinstaller --onefile --noconsole --name launcher launcher.py
       - name: Attach to release
         uses: softprops/action-gh-release@v2

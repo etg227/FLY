@@ -1,6 +1,7 @@
 from __future__ import annotations
 import os, subprocess, sys
 from pathlib import Path
+from .frozen_env import child_env, dll_search_reset
 
 # 替换动作跑在一个独立的解释器进程里，源码通过 -c 传参，不落盘。
 #
@@ -50,19 +51,22 @@ def schedule_launcher_replace(root: Path, log=lambda m: None, spawn=None):
                 "catch { Start-Sleep -Seconds 1 }}; "
                 "if($ok){exit 0}else{exit 3}"
             )
-            env = os.environ.copy()
+            # 替换进程设计上会比 FLY 活得久；不能让它从 FLY 的 _MEI 加载任何
+            # 文件，否则 FLY 退出时临时目录删不掉、弹出 PyInstaller 警告。
+            env = child_env()
             env["FLY_REPLACE_SRC"] = str(pending)
             env["FLY_REPLACE_DST"] = str(target)
-            spawn(
-                ["powershell.exe", "-NoProfile", "-NonInteractive",
-                 "-WindowStyle", "Hidden", "-Command", ps],
-                cwd=str(root),
-                env=env,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-            )
+            with dll_search_reset():
+                spawn(
+                    ["powershell.exe", "-NoProfile", "-NonInteractive",
+                     "-WindowStyle", "Hidden", "-Command", ps],
+                    cwd=str(root),
+                    env=env,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
         else:
             if not sys.executable:
                 log("[UPDATE] 找不到当前解释器，launcher.exe 自动替换已跳过。")

@@ -3,9 +3,18 @@ import os
 import unittest
 import uuid
 
-from launcher import _LauncherMutex
+# launcher 在 import 阶段就要 tkinter；没有 tk 的环境应当跳过而不是让整套
+# 测试在收集阶段失败。只吞 ImportError——launcher.py 的语法错误照样会炸出来。
+try:
+    import launcher
+except ImportError as exc:
+    launcher, HAVE_TK, SKIP_REASON = None, False, f"launcher 需要 tkinter（{exc}）"
+else:
+    HAVE_TK, SKIP_REASON = True, ""
+_LauncherMutex = launcher._LauncherMutex if HAVE_TK else None
 
 
+@unittest.skipUnless(HAVE_TK, SKIP_REASON)
 class LauncherMutexTests(unittest.TestCase):
     def test_default_name_uses_single_local_namespace_separator(self):
         m=_LauncherMutex()

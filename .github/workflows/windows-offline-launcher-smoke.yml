@@ -28,7 +28,7 @@ jobs:
       - name: Build release-equivalent standalone launcher
         shell: pwsh
         run: |
-          python -m pip install --disable-pip-version-check pyinstaller
+          python -m pip install --disable-pip-version-check "pyinstaller>=6.9"
           python scripts/build_launcher.py
           $size=(Get-Item "dist\launcher.exe").Length
           Write-Host "standalone launcher bytes=$size"
@@ -49,12 +49,21 @@ jobs:
             New-NetFirewallRule -DisplayName $rule -Direction Outbound -Program $exe -Action Block -Profile Any | Out-Null
 
             $env:PATH="$env:SystemRoot\System32;$env:SystemRoot;$env:SystemRoot\System32\WindowsPowerShell\v1.0"
+            # 记录运行前已有的 _MEI 目录，之后只看本次新建的
+            $meiBefore=@(Get-ChildItem $env:TEMP -Directory -Filter "_MEI*" -ErrorAction SilentlyContinue | ForEach-Object FullName)
+            $meiSeen=@{}
+            function Collect-Mei {
+              Get-ChildItem $env:TEMP -Directory -Filter "_MEI*" -ErrorAction SilentlyContinue |
+                Where-Object { $meiBefore -notcontains $_.FullName } |
+                ForEach-Object { $meiSeen[$_.FullName]=$true }
+            }
             $p=Start-Process $exe -WorkingDirectory $dir -PassThru
             Write-Host "bootstrap pid=$($p.Id)"
 
             $deadline=(Get-Date).AddSeconds(25)
             $log=Join-Path $dir "runtime\fly.log"
             while((Get-Date) -lt $deadline){
+              Collect-Mei
               $ready=(Test-Path (Join-Path $dir "main.py")) -and
                      (Test-Path (Join-Path $dir "backend\config.py")) -and
                      (Test-Path (Join-Path $dir "VERSION")) -and
@@ -96,6 +105,18 @@ jobs:
               $_.Name -match "^pythonw?\.exe$" -and $_.CommandLine -like "*$dir*main.py*"
             })
             if($external.Count -ne 0){ throw "external Python was used for first run" }
+
+            # onefile 启动器拉起 --run-main 后约 1 秒退出。旧版本里子进程复用并锁住
+            # 启动器的 _MEI，父进程清理失败会弹 "Failed to remove temporary directory"
+            # 并卡在对话框上——finally 的强杀会把它一起杀掉，所以以前从没被发现。
+            Collect-Mei
+            $exited=$p.WaitForExit(30000)
+            Collect-Mei
+            if(-not $exited){ throw "launcher parent did not exit by itself (blocked on temp-dir cleanup dialog?)" }
+            $remaining=@($meiSeen.Keys | Where-Object { Test-Path $_ })
+            Write-Host "new _MEI dirs seen=$($meiSeen.Count) remaining=$($remaining.Count)"
+            if($meiSeen.Count -lt 2){ throw "--run-main child reused the launcher's _MEI directory" }
+            if($remaining.Count -ne 1){ throw "launcher did not clean up its own _MEI directory (remaining=$($remaining.Count))" }
 
             Write-Host "OFFLINE FIRST RUN OK on ${{ matrix.os }}"
           }

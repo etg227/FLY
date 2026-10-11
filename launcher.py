@@ -563,11 +563,69 @@ def run_flow(root: Path, ui):
         ui.log(f"内核下载未完成（{e}），主程序会自动重试。")
     return py + [str(root/"main.py")]
 
+def _frozen_child_env():
+    """--run-main 子进程的环境：让它成为独立的顶层实例。
+
+    onefile 启动器拉起自己时，子进程继承父进程的 _PYI_ARCHIVE_FILE，
+    PyInstaller 引导程序判定「同一归档」就复用父进程环境——不解包，直接用
+    父进程的 _MEIxxxx 目录。启动器约 1 秒后退出，引导程序清理 _MEI 时
+    里面的 DLL/pyd 正被长期运行的 FLY 主程序占用，于是每次启动都弹
+    "Failed to remove temporary directory"（bootloader pyi_main.c）。
+
+    PYINSTALLER_RESET_ENVIRONMENT=1（≥ 6.9）强制子进程重置为新的顶层实例，
+    解包到自己的 _MEI、退出时自己清理；同时剥掉各代引导程序的复用标记
+    （6.x 的 _PYI_*，5.x 的 _MEIPASS2）——没有 _PYI_ARCHIVE_FILE 引导程序
+    同样会重置，所以老版本也覆盖得到。指向父进程 _MEI 的 Tcl/Tk 路径一并
+    去掉，用户自己设的同名变量保留。"""
+    env = dict(os.environ)
+    if not getattr(sys, "frozen", False):
+        return env
+    for key in list(env):
+        k = key.upper()
+        if k.startswith("_PYI_") or k == "_MEIPASS2":
+            env.pop(key, None)
+    env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        base = os.path.normcase(os.path.abspath(meipass))
+        for key in list(env):
+            if key.upper() not in ("TCL_LIBRARY", "TK_LIBRARY", "TKPATH"):
+                continue
+            val = os.path.normcase(os.path.abspath(env[key]))
+            if val == base or val.startswith(base + os.sep):
+                env.pop(key, None)
+    return env
+
+class _DllSearchReset:
+    """拉起子进程期间暂时撤掉引导程序设置的 DLL 搜索目录。
+
+    SetDllDirectoryW 会被子进程继承（引导程序源码注释原话），子进程因此
+    可能从父进程的 _MEI 里加载 DLL 并把它锁住。spawn 后立刻恢复，
+    不影响本进程后续的懒加载。"""
+    def __enter__(self):
+        self.prev = None
+        if os.name == "nt" and getattr(sys, "frozen", False):
+            try:
+                k32 = ctypes.windll.kernel32
+                buf = ctypes.create_unicode_buffer(32768)
+                if k32.GetDllDirectoryW(len(buf), buf):
+                    self.prev = buf.value or None
+                k32.SetDllDirectoryW(None)
+            except Exception:
+                self.prev = None
+        return self
+    def __exit__(self, *exc):
+        if self.prev:
+            try: ctypes.windll.kernel32.SetDllDirectoryW(self.prev)
+            except Exception: pass
+        return False
+
 def launch(root: Path, command):
-    subprocess.Popen(
-        list(command), cwd=str(root),
-        creationflags=getattr(subprocess,"CREATE_NO_WINDOW",0)
-    )
+    with _DllSearchReset():
+        subprocess.Popen(
+            list(command), cwd=str(root), env=_frozen_child_env(),
+            creationflags=getattr(subprocess,"CREATE_NO_WINDOW",0)
+        )
 
 def _run_embedded_main(root_arg: str) -> int:
     """Run extracted main.py with the PyInstaller-embedded CPython runtime."""

@@ -7,7 +7,14 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-import launcher
+# launcher 在 import 阶段就要 tkinter；没有 tk 的环境应当跳过而不是让整套
+# 测试在收集阶段失败。只吞 ImportError——launcher.py 的语法错误照样会炸出来。
+try:
+    import launcher
+except ImportError as exc:
+    launcher, HAVE_TK, SKIP_REASON = None, False, f"launcher 需要 tkinter（{exc}）"
+else:
+    HAVE_TK, SKIP_REASON = True, ""
 
 
 class DummyUi:
@@ -44,6 +51,7 @@ def make_payload(root: Path):
     return payload
 
 
+@unittest.skipUnless(HAVE_TK, SKIP_REASON)
 class EmbeddedBootstrapTests(unittest.TestCase):
     def setUp(self):
         self.tmp=Path(tempfile.mkdtemp())
