@@ -110,6 +110,12 @@ def apply_theme(root):
     style.map("Log.Vertical.TScrollbar", background=[("active", "#3A425A")])
 
 
+def autowrap(label, margin=0):
+    """让 Label 的折行宽度跟随自身实际宽度（固定像素在窄窗口下会溢出）。"""
+    label.bind("<Configure>", lambda e: label.configure(wraplength=max(60, e.width - margin)), add="+")
+    return label
+
+
 def style_toplevel(win):
     win.configure(bg=C["bg"])
 
@@ -503,6 +509,14 @@ class Hero(tk.Canvas):
         self.title, self.subtitle, self.badge = title, subtitle, badge
         self.bind("<Configure>", lambda e: self._draw())
         self._overlay = []
+        self._side = None
+
+    def bind_side(self, label, value_var, sub_label, sub_var):
+        """右侧信息块（当前节点 / 延迟），跟随 StringVar 实时重画。"""
+        self._side = (label, value_var, sub_label, sub_var)
+        for var in (value_var, sub_var):
+            var.trace_add("write", lambda *_: self.after_idle(self._draw))
+        self._draw()
 
     def place_widget(self, widget, relx_right=24, y=22):
         self._overlay.append((widget, relx_right, y))
@@ -533,16 +547,33 @@ class Hero(tk.Canvas):
                 a = math.radians(k)
                 pts += [cx + sx * (r - r * math.cos(a)), cy + sy * (r - r * math.sin(a))]
             self.create_polygon(pts, fill=bg, outline=bg)
-        self.create_text(32, 52, text=self.title, anchor="w", fill="#FFFFFF", font=FONTS["h1"])
+        self.create_text(32, 46, text=self.title, anchor="w", fill="#FFFFFF", font=FONTS["h1"])
         if self.badge:
             ft = tkfont.Font(font=FONTS["small"])
             tw = tkfont.Font(font=FONTS["h1"]).measure(self.title)
             bx = 32 + tw + 14
             bw = ft.measure(self.badge) + 18
-            rounded_rect(self, bx, 40, bx + bw, 64, 11, fill=_mix(C["accent"], "#FFFFFF", .25), outline="")
-            self.create_text(bx + bw / 2, 52, text=self.badge, fill="#FFFFFF", font=FONTS["small"])
-        self.create_text(32, 98, text=self.subtitle, anchor="nw", fill=_mix("#FFFFFF", C["accent"], .12),
-                         font=FONTS["ui"], width=max(200, w - 64))
+            rounded_rect(self, bx, 34, bx + bw, 58, 11, fill=_mix(C["accent"], "#FFFFFF", .25), outline="")
+            self.create_text(bx + bw / 2, 46, text=self.badge, fill="#FFFFFF", font=FONTS["small"])
+        side_w = 270 if self._side else 0
+        self.create_text(32, 84, text=self.subtitle, anchor="nw", fill=_mix("#FFFFFF", C["accent"], .12),
+                         font=FONTS["ui"], width=max(200, w - 64 - side_w))
+        if self._side:
+            label, var, sub_label, sub_var = self._side
+            try:
+                value, sub = var.get(), sub_var.get()
+            except tk.TclError:
+                value, sub = "-", "-"
+            ft = tkfont.Font(font=FONTS["h3"])
+            if ft.measure(value) > side_w - 20:
+                while len(value) > 1 and ft.measure(value + "…") > side_w - 20:
+                    value = value[:-1]
+                value += "…"
+            x = w - 26
+            soft = _mix("#FFFFFF", C["accent2"], .2)
+            self.create_text(x, 62, text=label, anchor="ne", fill=soft, font=FONTS["small"])
+            self.create_text(x, 80, text=value, anchor="ne", fill="#FFFFFF", font=FONTS["h3"])
+            self.create_text(x, 108, text=f"{sub_label} {sub}", anchor="ne", fill=soft, font=FONTS["ui"])
         for widget, right, y in self._overlay:
             self.create_window(w - right, y, window=widget, anchor="ne")
 
@@ -732,3 +763,398 @@ class ProfileTile(Card):
             self.box.create_line(6, 11, 10, 15, 16, 7, fill="#FFFFFF", width=2, capstyle="round", joinstyle="round")
         else:
             rounded_rect(self.box, 1, 1, 21, 21, 6, fill=C["card"], outline=C["muted"])
+
+
+# ---- 通知（替代弹窗） ---------------------------------------------------
+
+def _draw_glyph(cv, kind, cx, cy, color):
+    """自绘通知图标，不依赖图标字体。"""
+    w = 2
+    if kind == "ok":
+        cv.create_line(cx - 5, cy, cx - 1, cy + 4, cx + 5, cy - 4, fill=color, width=w,
+                       capstyle="round", joinstyle="round")
+    elif kind == "err":
+        cv.create_line(cx - 4, cy - 4, cx + 4, cy + 4, fill=color, width=w, capstyle="round")
+        cv.create_line(cx - 4, cy + 4, cx + 4, cy - 4, fill=color, width=w, capstyle="round")
+    elif kind == "warn":
+        cv.create_line(cx, cy - 5, cx, cy + 1, fill=color, width=w, capstyle="round")
+        cv.create_oval(cx - 1.3, cy + 3.5, cx + 1.3, cy + 6, fill=color, outline="")
+    else:
+        cv.create_oval(cx - 1.3, cy - 6, cx + 1.3, cy - 3.5, fill=color, outline="")
+        cv.create_line(cx, cy - 1, cx, cy + 5, fill=color, width=w, capstyle="round")
+
+
+class Toast(tk.Canvas):
+    KINDS = {"info": C["accent"], "ok": C["ok"], "warn": C["warn"], "err": C["err"]}
+    WIDTH = 340
+
+    def __init__(self, host, text, kind, title, duration):
+        super().__init__(host.win, width=self.WIDTH, height=60, bg=_bg_of(host.win),
+                         highlightthickness=0, bd=0, cursor="hand2")
+        self.host, self.kind = host, kind if kind in self.KINDS else "info"
+        self.duration, self.left = duration, duration
+        self.y = 0.0
+        self._hover = False
+        self._closing = False
+        color = self.KINDS[self.kind]
+        tx = 54
+        self.create_text(tx, 20 if title else 0, text=text, anchor="nw", width=self.WIDTH - tx - 34,
+                                font=FONTS["ui"], fill=C["text"])
+        if title:
+            self.create_text(tx, 0, text=title, anchor="nw", font=FONTS["ui_b"], fill=C["text"], tags="title")
+        x0, y0, x1, y1 = self.bbox("all")
+        h = max(56, (y1 - y0) + 30)
+        self.delete("all")
+        self.configure(height=h + 4)
+        rounded_rect(self, 3, 4, self.WIDTH - 1, h + 3, 12, fill=_mix(C["text"], C["bg"], .9), outline="")
+        rounded_rect(self, 1, 1, self.WIDTH - 3, h, 12, fill=C["card"], outline=C["border"])
+        self.create_oval(16, h / 2 - 13, 42, h / 2 + 13, fill=_mix(color, "#FFFFFF", .85), outline="")
+        _draw_glyph(self, self.kind, 29, h / 2, color)
+        top = (h - (y1 - y0)) / 2
+        if title:
+            self.create_text(tx, top, text=title, anchor="nw", font=FONTS["ui_b"], fill=C["text"])
+            top += 20
+        self.create_text(tx, top, text=text, anchor="nw", width=self.WIDTH - tx - 34,
+                         font=FONTS["ui"], fill=C["text"] if not title else C["subtext"])
+        self.create_text(self.WIDTH - 20, 14, text="✕", font=FONTS["small"], fill=C["muted"])
+        self._bar = self.create_line(14, h - 2, self.WIDTH - 17, h - 2, fill=color, width=2, capstyle="round")
+        self._bar_span = (14, self.WIDTH - 17, h - 2)
+        self.height = h + 4
+        self.bind("<Enter>", lambda e: setattr(self, "_hover", True))
+        self.bind("<Leave>", lambda e: setattr(self, "_hover", False))
+        self.bind("<Button-1>", lambda e: self.dismiss())
+        self._last = time.perf_counter()
+        loop(self, "life", self._tick, 33)
+
+    def _tick(self, _elapsed):
+        now = time.perf_counter()
+        if not self._hover and not self._closing:
+            self.left -= (now - self._last) * 1000
+        self._last = now
+        x0, x1, y = self._bar_span
+        frac = max(0.0, self.left / self.duration)
+        self.coords(self._bar, x0, y, x0 + (x1 - x0) * frac, y)
+        if self.left <= 0 and not self._closing:
+            self.dismiss()
+
+    def dismiss(self):
+        if self._closing:
+            return
+        self._closing = True
+        stop_anim(self, "life")
+        start = float(self.place_info().get("x", -self.host.right) or -self.host.right)
+
+        def step(t):
+            self.place_configure(x=round(start + (self.WIDTH + 40) * t))
+        animate(self, "slide", 220, step, done=self._gone, ease=lambda t: t * t)
+
+    def _gone(self):
+        self.host._remove(self)
+        self.destroy()
+
+
+class ToastHost:
+    """窗口右下角的通知栈：新通知从右侧滑入，旧通知向上让位，到时自动滑出。"""
+
+    MAX = 4
+    DURATION = {"info": 3200, "ok": 3200, "warn": 5000, "err": 8000}
+
+    def __init__(self, win, right=16, bottom=16):
+        self.win, self.right, self.bottom = win, right, bottom
+        self.toasts = []
+        win.__dict__["_toast_host"] = self
+
+    @classmethod
+    def of(cls, win):
+        # 对话框右下角通常是“保存”按钮，通知要停在按钮上方，不能挡住它
+        return win.__dict__.get("_toast_host") or cls(win, right=16, bottom=60)
+
+    def show(self, text, kind="info", title=None, duration=None):
+        text = str(text)
+        if duration is None:
+            duration = self.DURATION.get(kind, 3200) + min(6000, 40 * max(0, len(text) - 40))
+        t = Toast(self, text, kind, title, duration)
+        t.y = -self.bottom
+        t.place(relx=1.0, rely=1.0, anchor="se", x=Toast.WIDTH + 30, y=t.y)
+        tk.Misc.tkraise(t)  # Canvas.lift 是画布图元的 raise，不是控件层级
+        self.toasts.insert(0, t)
+        animate(t, "slide", 320, lambda p: t.place_configure(x=round(Toast.WIDTH + 30 - (Toast.WIDTH + 30 + self.right) * p)))
+        while len([x for x in self.toasts if not x._closing]) > self.MAX:
+            [x for x in self.toasts if not x._closing][-1].dismiss()
+        self._restack()
+        return t
+
+    def _remove(self, toast):
+        if toast in self.toasts:
+            self.toasts.remove(toast)
+            self._restack()
+
+    def _restack(self):
+        y = -self.bottom
+        for t in self.toasts:
+            target, start = y, t.y
+            if abs(target - start) > 0.5:
+                def step(p, t=t, start=start, target=target):
+                    t.y = start + (target - start) * p
+                    t.place_configure(y=round(t.y))
+                animate(t, "stack", 240, step)
+            y -= t.height + 8
+
+
+def toast(win, text, kind="info", title=None, duration=None):
+    try:
+        return ToastHost.of(win).show(text, kind, title, duration)
+    except tk.TclError:
+        return None
+
+
+# ---- 数字滚动 -----------------------------------------------------------
+
+class CountLabel(tk.Label):
+    """数值变化时从旧值滚动到新值。"""
+
+    def __init__(self, master, fmt, value=0.0, **kw):
+        super().__init__(master, **kw)
+        self.fmt, self.value = fmt, float(value)
+        self.configure(text=fmt(self.value))
+
+    def set_value(self, value, duration=600):
+        value = float(value)
+        start = self.value
+        self.value = value
+        if start == value:
+            self.configure(text=self.fmt(value)); return
+        animate(self, "count", duration, lambda t: self.configure(text=self.fmt(start + (value - start) * t)))
+
+    def set_text(self, text):
+        stop_anim(self, "count")
+        self.configure(text=text)
+
+
+# ---- 实时速率曲线 -------------------------------------------------------
+
+class SpeedChart(tk.Frame):
+    """下行（面积）+ 上行（折线）实时速率图，新采样到来时平滑向左滚动。"""
+
+    N = 30
+
+    def __init__(self, master, fmt_speed, interval_ms=2000, height=74):
+        bg = _bg_of(master)
+        super().__init__(master, bg=bg)
+        self.fmt, self.interval = fmt_speed, interval_ms
+        head = tk.Frame(self, bg=bg); head.pack(fill="x")
+        dot = lambda: tk.Canvas(head, width=10, height=10, bg=bg, highlightthickness=0)
+        d1 = dot(); d1.create_oval(1, 1, 9, 9, fill=C["accent"], outline=""); d1.pack(side="left")
+        self.down = CountLabel(head, lambda v: "↓ " + fmt_speed(v), font=FONTS["value"], bg=bg, fg=C["text"])
+        self.down.pack(side="left", padx=(6, 18))
+        d2 = dot(); d2.create_oval(1, 1, 9, 9, fill=C["accent2"], outline=""); d2.pack(side="left")
+        self.up = CountLabel(head, lambda v: "↑ " + fmt_speed(v), font=FONTS["ui_b"], bg=bg, fg=C["subtext"])
+        self.up.pack(side="left", padx=(6, 0))
+        self.cv = tk.Canvas(self, height=height, bg=bg, highlightthickness=0, bd=0)
+        self.cv.pack(fill="x", pady=(8, 0))
+        self.cv.bind("<Configure>", lambda e: self._draw())
+        self.samples = []
+        self.offset = 0.0        # 0..1，新点滑入的进度
+        self.scale = 1.0
+        self.active = False
+        self.idle()
+
+    def idle(self):
+        self.active = False
+        self.samples = []
+        stop_anim(self.cv, "scroll")
+        self.down.set_text("↓ —"); self.up.set_text("↑ —")
+        self._draw()
+
+    def push(self, down, up):
+        down, up = max(0.0, float(down)), max(0.0, float(up))
+        if not self.active:
+            self.active = True
+            self.samples = [(0.0, 0.0)] * self.N
+            self.down.value = self.up.value = 0.0
+        self.samples = (self.samples + [(down, up)])[-(self.N + 1):]
+        self.down.set_value(down, 700)
+        self.up.set_value(up, 700)
+        target = max([max(d, u) for d, u in self.samples] + [32 * 1024]) * 1.25
+        s0 = self.scale
+
+        def step(t):
+            self.offset = t
+            self.scale = s0 + (target - s0) * min(1.0, t * 2.5)
+            self._draw()
+        # 线性滚动、时长略短于采样间隔，保证一次滚完再来下一个点
+        animate(self.cv, "scroll", int(self.interval * 0.92), step, ease=lambda t: t)
+
+    def _draw(self):
+        cv = self.cv
+        w, h = cv.winfo_width(), cv.winfo_height()
+        if w < 10:
+            return
+        cv.delete("all")
+        pad = 4
+        for frac in (0.0, 0.5, 1.0):
+            y = pad + (h - 2 * pad) * frac
+            cv.create_line(0, y, w, y, fill=C["border"] if frac == 1.0 else C["card_alt"])
+        if not self.active or len(self.samples) < 2:
+            cv.create_text(w / 2, h / 2, text="开始加速后显示实时速率", fill=C["muted"], font=FONTS["small"])
+            return
+        cv.create_text(w - 2, pad + 1, text=self.fmt(self.scale / 1.25), anchor="ne", fill=C["muted"],
+                       font=FONTS["small"])
+        step = w / (self.N - 1)
+        n = len(self.samples)
+        shift = step * (1 - self.offset)
+
+        def pts(idx):
+            out = []
+            for i, s in enumerate(self.samples):
+                x = w - (n - 1 - i) * step + shift
+                y = h - pad - (h - 2 * pad) * min(1.0, s[idx] / self.scale)
+                out += [x, y]
+            return out
+        down = pts(0)
+        cv.create_polygon([down[0], h] + down + [down[-2], h], fill=_mix(C["accent"], C["card"], .82),
+                          outline="", smooth=True)
+        cv.create_line(down, fill=C["accent"], width=2, smooth=True)
+        cv.create_line(pts(1), fill=C["accent2"], width=1.5, smooth=True, dash=(4, 3))
+        x, y = down[-2], down[-1]
+        if x <= w:
+            cv.create_oval(x - 3.5, y - 3.5, x + 3.5, y + 3.5, fill=C["card"], outline=C["accent"], width=2)
+
+
+# ---- 订阅用量条 ---------------------------------------------------------
+
+class QuotaBars(tk.Frame):
+    """每条订阅一根进度条（已用比例），填充动画从当前值过渡到新值。"""
+
+    def __init__(self, master, fmt_bytes):
+        super().__init__(master, bg=_bg_of(master))
+        self.fmt = fmt_bytes
+        self._rows = []
+        self._ratios = {}
+
+    def message(self, text):
+        self._clear()
+        tk.Label(self, text=text, font=FONTS["small"], bg=self.cget("bg"), fg=C["muted"],
+                 anchor="w").pack(fill="x")
+
+    def _clear(self):
+        for w in self.winfo_children():
+            w.destroy()
+
+    def set(self, items):
+        """items: [(tag, quota_dict_or_None, reason_text)]"""
+        self._clear()
+        bg = self.cget("bg")
+        for i, (tag, q, reason) in enumerate(items):
+            row = tk.Frame(self, bg=bg); row.pack(fill="x", pady=(0 if i == 0 else 8, 0))
+            top = tk.Frame(row, bg=bg); top.pack(fill="x")
+            if not q:
+                tk.Label(top, text=(tag + " " if tag else "") + reason, font=FONTS["small"], bg=bg,
+                         fg=C["muted"], anchor="w").pack(side="left")
+                continue
+            if q["ratio"] is None:
+                left = f"已用 {self.fmt(q['used'])}（不限量）"
+            else:
+                left = f"剩余 {self.fmt(q['remaining'])} / {self.fmt(q['total'])}"
+            color = C["err"] if q["low"] else C["accent"]
+            tk.Label(top, text=(tag + " " if tag else "") + left, font=FONTS["small"], bg=bg,
+                     fg=C["err"] if q["low"] else C["text"], anchor="w").pack(side="left")
+            if q["expire"]:
+                try:
+                    exp = "到期 " + time.strftime("%Y-%m-%d", time.localtime(q["expire"]))
+                except (OverflowError, OSError, ValueError):
+                    exp = ""
+                tk.Label(top, text=exp, font=FONTS["small"], bg=bg, fg=C["muted"]).pack(side="right")
+            if q["ratio"] is None:
+                continue
+            bar = tk.Canvas(row, height=8, bg=bg, highlightthickness=0, bd=0)
+            bar.pack(fill="x", pady=(5, 0))
+            key = tag or "_"
+            start = self._ratios.get(key, 0.0)
+            self._ratios[key] = q["ratio"]
+            state = {"r": start}
+
+            def draw(_e=None, bar=bar, state=state, color=color):
+                w = bar.winfo_width()
+                bar.delete("all")
+                rounded_rect(bar, 0, 0, w, 8, 4, fill=C["card_alt"], outline=C["border"])
+                fw = max(8.0, w * state["r"]) if state["r"] > 0 else 0
+                if fw:
+                    rounded_rect(bar, 0, 0, fw, 8, 4, fill=color, outline="")
+            bar.bind("<Configure>", draw)
+
+            def step(t, state=state, start=start, end=q["ratio"], draw=draw):
+                state["r"] = start + (end - start) * t
+                draw()
+            animate(bar, "fill", 900, step)
+
+
+# ---- 用量统计 -----------------------------------------------------------
+
+class StatTile(tk.Frame):
+    def __init__(self, master, title, fmt_bytes):
+        bg = _bg_of(master)
+        super().__init__(master, bg=bg)
+        self.fmt = fmt_bytes
+        tk.Label(self, text=title, font=FONTS["small"], bg=bg, fg=C["subtext"], anchor="w").pack(fill="x")
+        self.main = CountLabel(self, fmt_bytes, font=FONTS["value"], bg=bg, fg=C["text"], anchor="w")
+        self.main.pack(fill="x", pady=(2, 0))
+        self.sub = CountLabel(self, lambda v: "直连 " + fmt_bytes(v), font=FONTS["small"], bg=bg,
+                              fg=C["muted"], anchor="w")
+        self.sub.pack(fill="x")
+
+    def set(self, proxied, direct):
+        self.main.set_value(proxied)
+        self.sub.set_value(direct)
+
+
+class MiniBars(tk.Canvas):
+    """近 7 天走日本节点的用量柱状图；数值变化时柱子平滑长高/缩短。"""
+
+    WEEK = "一二三四五六日"
+
+    def __init__(self, master, fmt_bytes, height=62):
+        super().__init__(master, height=height, bg=_bg_of(master), highlightthickness=0, bd=0)
+        self.fmt = fmt_bytes
+        self.days = []
+        self.shown = []
+        self.bind("<Configure>", lambda e: self._draw())
+
+    def set(self, days):
+        """days: [(YYYY-MM-DD, proxied, direct)]"""
+        old = self.shown if len(self.shown) == len(days) else [0.0] * len(days)
+        new = [float(p) for _, p, _ in days]
+        self.days = days
+        if old == new:
+            self.shown = new; self._draw(); return
+
+        def step(t):
+            self.shown = [a + (b - a) * t for a, b in zip(old, new)]
+            self._draw()
+        animate(self, "grow", 700, step)
+
+    def _draw(self):
+        w, h = self.winfo_width(), self.winfo_height()
+        self.delete("all")
+        if w < 10 or not self.days:
+            return
+        n = len(self.days)
+        top, label_h = 4, 16
+        area = h - top - label_h
+        peak = max(max(self.shown or [0]), 1.0)
+        slot = w / n
+        bw = min(26, slot * 0.56)
+        for i, (key, _, _) in enumerate(self.days):
+            cx = slot * i + slot / 2
+            v = self.shown[i] if i < len(self.shown) else 0
+            bh = max(3.0, area * v / peak) if v > 0 else 3.0
+            today = i == n - 1
+            fill = C["accent"] if today else _mix(C["accent"], C["card"], .62)
+            rounded_rect(self, cx - bw / 2, top + area - bh, cx + bw / 2, top + area, 4, fill=fill, outline="")
+            try:
+                wd = time.strptime(key, "%Y-%m-%d").tm_wday
+                lab = "今" if today else self.WEEK[wd]
+            except ValueError:
+                lab = ""
+            self.create_text(cx, h - label_h / 2, text=lab, font=FONTS["small"],
+                             fill=C["accent"] if today else C["muted"])

@@ -35,8 +35,17 @@ DEFAULT_APP_SETTINGS = {
     "latency_timeout_ms": 5000,
     "last_node": "",
     "sticky_max_delay_ms": 1000,
-    "jp_keywords": ["Japan","JPN","JP","日本","Tokyo","Osaka","東京","东京","大阪","🇯🇵"]
+    "jp_keywords": ["Japan","JPN","JP","日本","Tokyo","Osaka","東京","东京","大阪","🇯🇵"],
+    # 界面记忆：重启后恢复上次勾选的配置、窗口位置/大小和所在页面
+    "selected_profiles": [],
+    "selection_saved": False,
+    "window_geometry": "",
+    "last_page": "home",
+    "close_to_tray": True,
+    "tray_hint_shown": False,
 }
+UI_PAGES = ("home", "profiles", "log", "about")
+_GEOMETRY_RE = re.compile(r"^\d{2,5}x\d{2,5}[+-]-?\d{1,5}[+-]-?\d{1,5}$")
 DEFAULT_CUSTOM_PROFILES = {"profiles": []}
 
 _JSON_LOCKS = {}
@@ -272,6 +281,18 @@ def load_app_settings(paths):
         data["last_node"] = str(raw.get("last_node", "") or "").strip()
         data["sticky_max_delay_ms"] = _safe_int(raw.get("sticky_max_delay_ms", 1000), 1000, 100, 60000)
         data["jp_keywords"] = _normalize_jp_keywords(raw.get("jp_keywords"))
+
+        selected = raw.get("selected_profiles", [])
+        data["selected_profiles"] = list(dict.fromkeys(
+            str(x).strip() for x in (selected if isinstance(selected, list) else [])
+            if isinstance(x, str) and _ID_RE.fullmatch(str(x).strip())))[:64]
+        data["selection_saved"] = _safe_bool(raw.get("selection_saved", False), False)
+        geometry = str(raw.get("window_geometry", "") or "").strip()
+        data["window_geometry"] = geometry if _GEOMETRY_RE.fullmatch(geometry) else ""
+        page = str(raw.get("last_page", "home") or "home").strip()
+        data["last_page"] = page if page in UI_PAGES else "home"
+        data["close_to_tray"] = _safe_bool(raw.get("close_to_tray", True), True)
+        data["tray_hint_shown"] = _safe_bool(raw.get("tray_hint_shown", False), False)
 
         old_nikke = str(raw.get("nikke_exe", "") or "").strip()
         if old_nikke and not data["game_exes"].get("nikke"):

@@ -202,6 +202,24 @@ def _normalize_expire(value):
         n //= 1000
     return n
 
+def quota_from_userinfo(info):
+    """结构化的订阅用量，供界面画进度条；没有流量信息时返回 None。"""
+    if not isinstance(info, dict) or not info:
+        return None
+    total = max(0, _finite_int(info.get("total")) or 0)
+    used = max(0, _finite_int(info.get("upload")) or 0) + max(0, _finite_int(info.get("download")) or 0)
+    if not total and not used:
+        return None
+    remaining = max(0, total - used) if total else 0
+    return {
+        "total": total,
+        "used": used,
+        "remaining": remaining,
+        "ratio": min(1.0, used / total) if total else None,
+        "low": bool(total) and remaining / total <= 0.1,
+        "expire": _normalize_expire(info.get("expire")),
+    }
+
 def describe_userinfo(info):
     if not isinstance(info, dict) or not info:
         return "订阅未提供流量信息"

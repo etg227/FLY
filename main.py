@@ -1,5 +1,5 @@
 from __future__ import annotations
-import argparse, json, os, queue, threading, time
+import argparse, json, os, queue, re, threading, time
 from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
@@ -19,13 +19,17 @@ from backend.launcher import log_hints
 from backend.instance_lock import SingleInstance
 from backend.mihomo_api import MihomoApi, JapanNodeSelector
 from backend.privacy import redact_log_line
-from backend.subscription import check_subscription, describe_userinfo, fmt_bytes, fmt_speed
+from backend.subscription import check_subscription, fmt_bytes, fmt_speed, quota_from_userinfo
+from backend.usage_stats import ConnectionMeter, UsageStore
+from backend.app_icon import photo_rows, write_icons
+from backend import win_tray
 from backend.system_proxy import SystemProxy
 from backend.self_update import schedule_launcher_replace
 from backend.windows_admin import is_admin
 from backend.ui_theme import (
-    C, FONTS, ICONS, Card, Hero, NavItem, ProfileTile, RoundButton, StatusPill, SwitchRow,
-    apply_theme, autohide, rounded_rect, slide_in, style_toplevel,
+    C, FONTS, ICONS, Card, Hero, MiniBars, NavItem, ProfileTile, QuotaBars, RoundButton, SpeedChart,
+    StatTile, StatusPill, SwitchRow, ToastHost, apply_theme, autohide, autowrap, rounded_rect, slide_in,
+    style_toplevel, toast,
 )
 
 APP_DIR = Path(__file__).resolve().parent
@@ -107,14 +111,23 @@ class FlyApp:
         self.source_var = tk.StringVar()
         self.node_var = tk.StringVar(value="-")
         self.delay_var = tk.StringVar(value="-")
-        self.sub_var = tk.StringVar(value="-")
-        self.traffic_var = tk.StringVar(value="-")
+        self.usage = UsageStore(PATHS.runtime / "usage.json")
+        self._session_usage = [0, 0]
+
+        self.tray = None
+        self._status_text = ""
+        self._ui_save_job = None
+        self._icons = write_icons(PATHS.runtime / "icons")
+        self._apply_window_icon()
+        self._restore_geometry(app.get("window_geometry", ""))
 
         self.build()
         self.reload_profiles(first=True)
+        self.show_page(app.get("last_page", "home"), animate=False)
         self.refresh_status()
         self.root.after(100, self.flush_logs)
-        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+        self._setup_tray()
+        self.root.protocol("WM_DELETE_WINDOW", self.on_close_request)
 
         self.log(f"FLY v{self.version} 就绪。")
         self.log("安全原则：未命中所选业务规则的连接最终 MATCH,DIRECT；TUN 模式 DNS 由本地 Mihomo 接管，DIRECT 出口使用系统解析。")
@@ -164,13 +177,18 @@ class FlyApp:
         self._build_profiles(self.pages["profiles"])
         self._build_log(self.pages["log"])
         self._build_about(self.pages["about"])
-        self.show_page("home")
+        # 通知堆在主页“一键加速”按钮上方的右下角
+        ToastHost(self.root, right=24, bottom=110)
+        self._render_usage(animate_bars=True)
 
-    def show_page(self, key):
+    def show_page(self, key, animate=True):
+        if key not in self.pages:
+            key = "home"
         if key == self._page:
             return
-        first = self._page is None
+        first = self._page is None or not animate
         self._page = key
+        self._schedule_ui_save()
         for k, page in self.pages.items():
             if k != key:
                 page.place_forget()
@@ -199,17 +217,20 @@ class FlyApp:
         row = tk.Frame(parent, bg=parent.cget("bg")); row.pack(fill="x", pady=(8, 0))
         tk.Label(row, text=label, width=8, anchor="w", font=FONTS["ui"], bg=row.cget("bg"),
                  fg=C["subtext"]).pack(side="left", anchor="n")
-        tk.Label(row, textvariable=var, anchor="w", justify="left", wraplength=wrap,
-                 font=FONTS["ui_b"] if bold else FONTS["ui"], bg=row.cget("bg"),
-                 fg=C["text"]).pack(side="left", fill="x", expand=True)
+        value = tk.Label(row, textvariable=var, anchor="w", justify="left", wraplength=wrap,
+                         font=FONTS["ui_b"] if bold else FONTS["ui"], bg=row.cget("bg"), fg=C["text"])
+        value.pack(side="left", fill="x", expand=True)
+        if wrap:
+            autowrap(value)
         return row
 
     def _build_home(self, page):
         hero = Hero(page, "FLY",
-                    "使用你自己的 Clash/Mihomo 节点，只让勾选的区域限定应用/服务走日本线路，其余流量保持本地直连。",
-                    badge=f"v{self.version}", height=168)
+                    "只让勾选的应用/服务走日本线路，其余流量保持本地直连。",
+                    badge=f"v{self.version}", height=140)
         hero.pack(fill="x")
-        hero.place_widget(StatusPill(hero, self.status_var, on_dark=True, bg=C["accent2"]))
+        hero.bind_side("日本节点", self.node_var, "延迟", self.delay_var)
+        hero.place_widget(StatusPill(hero, self.status_var, on_dark=True, bg=C["accent2"]), y=18)
 
         # 底部操作栏（BakaXL 式：左侧次要操作，右侧大启动按钮）
         bar = tk.Frame(page, bg=C["bg"]); bar.pack(side="bottom", fill="x", pady=(16, 0))
@@ -231,36 +252,42 @@ class FlyApp:
         grid = tk.Frame(page, bg=C["bg"]); grid.pack(fill="both", expand=True, pady=(16, 0))
         grid.columnconfigure(0, weight=1, uniform="c"); grid.columnconfigure(1, weight=1, uniform="c")
 
-        node = Card(grid); node.grid(row=0, column=0, sticky="nsew", padx=(0, 8), pady=(0, 16))
-        self._card_title(node, "globe", "日本节点")
-        tk.Label(node.body, textvariable=self.node_var, font=FONTS["value"], bg=node.fill, fg=C["text"],
-                 anchor="w", justify="left", wraplength=320).pack(fill="x", pady=(10, 0))
-        lat = tk.Frame(node.body, bg=node.fill); lat.pack(fill="x", pady=(6, 0))
-        tk.Label(lat, text="延迟", font=FONTS["small"], bg=node.fill, fg=C["subtext"]).pack(side="left")
-        tk.Label(lat, textvariable=self.delay_var, font=FONTS["ui_b"], bg=node.fill,
-                 fg=C["accent"]).pack(side="left", padx=(8, 0))
-
-        back = Card(grid); back.grid(row=0, column=1, sticky="nsew", padx=(8, 0), pady=(0, 16))
+        back = Card(grid, pad=14); back.grid(row=1, column=0, sticky="nsew", padx=(0, 8))
         head = self._card_title(back, "chip", "后端")
         RoundButton(head, text="设置", command=self.open_settings, width=64, height=28, radius=8,
                     font=FONTS["small"]).pack(side="right")
         self._kv(back.body, "内核", self.core_var, bold=True)
-        self._kv(back.body, "节点来源", self.source_var, wrap=260)
+        self._kv(back.body, "节点来源", self.source_var, wrap=300)
 
-        traffic = Card(grid); traffic.grid(row=1, column=0, columnspan=2, sticky="nsew", pady=(0, 16))
-        self._card_title(traffic, "speed", "流量")
-        self._kv(traffic.body, "订阅流量", self.sub_var, wrap=640)
-        self._kv(traffic.body, "实时流量", self.traffic_var)
+        traffic = Card(grid); traffic.grid(row=0, column=0, sticky="nsew", padx=(0, 8), pady=(0, 16))
+        self._card_title(traffic, "speed", "实时流量")
+        self.speed_chart = SpeedChart(traffic.body, fmt_speed, interval_ms=2000, height=64)
+        self.speed_chart.pack(fill="x", pady=(10, 0))
+        self.quota_bars = QuotaBars(traffic.body, fmt_bytes)
+        self.quota_bars.pack(fill="x", pady=(12, 0))
 
-        sel = Card(grid); sel.grid(row=2, column=0, columnspan=2, sticky="nsew")
+        stats = Card(grid); stats.grid(row=0, column=1, sticky="nsew", padx=(8, 0), pady=(0, 16))
+        head = self._card_title(stats, "chip", "用量统计")
+        tk.Label(head, text="走日本节点的流量", font=FONTS["small"], bg=stats.fill,
+                 fg=C["muted"]).pack(side="right")
+        tiles = tk.Frame(stats.body, bg=stats.fill); tiles.pack(fill="x", pady=(10, 0))
+        self.stat_tiles = {}
+        for i, (key, title) in enumerate((("session", "本次"), ("today", "今日"), ("month", "本月"))):
+            tiles.columnconfigure(i, weight=1, uniform="t")
+            tile = StatTile(tiles, title, fmt_bytes); tile.grid(row=0, column=i, sticky="ew")
+            self.stat_tiles[key] = tile
+        self.week_bars = MiniBars(stats.body, fmt_bytes, height=58)
+        self.week_bars.pack(fill="x", pady=(10, 0))
+
+        sel = Card(grid, pad=14); sel.grid(row=1, column=1, sticky="nsew", padx=(8, 0))
         head = self._card_title(sel, "profiles", "本次加速")
         link = tk.Label(head, text="管理分流配置 ›", font=FONTS["small"], bg=sel.fill, fg=C["accent"],
                         cursor="hand2")
         link.pack(side="right")
         link.bind("<Button-1>", lambda e: self.show_page("profiles"))
         self.selection_var = tk.StringVar(value="-")
-        tk.Label(sel.body, textvariable=self.selection_var, font=FONTS["ui"], bg=sel.fill, fg=C["text"],
-                 anchor="w", justify="left", wraplength=680).pack(fill="x", pady=(8, 0))
+        autowrap(tk.Label(sel.body, textvariable=self.selection_var, font=FONTS["ui"], bg=sel.fill,
+                          fg=C["text"], anchor="w", justify="left", wraplength=360)).pack(fill="x", pady=(8, 0))
 
     def _build_profiles(self, page):
         head = self._page_header(page, "分流配置",
@@ -336,6 +363,166 @@ class FlyApp:
                      "FLY 是开源的 Mihomo 选择性代理 / 策略分流前端。FLY 不提供代理节点、VPS、会员、账号、付费、兑换码或任何网络服务；"
                      "订阅 URL、UUID 等凭据只保存在本机 private\\ 目录。")).pack(fill="x", pady=(8, 0))
 
+    def toast(self, text, kind="info", title=None):
+        try:
+            hidden = not self.root.winfo_viewable()
+        except tk.TclError:
+            return
+        if hidden and self._tray_ok():
+            self.tray.balloon(title or "FLY", text, kind)
+        else:
+            toast(self.root, text, kind, title)
+
+    def _render_usage(self, animate_bars=False):
+        try:
+            p, d = self._session_usage
+            self.stat_tiles["session"].set(p, d)
+            self.stat_tiles["today"].set(*self.usage.today())
+            self.stat_tiles["month"].set(*self.usage.month())
+            self.week_bars.set(self.usage.last_days(7))
+        except (tk.TclError, KeyError, AttributeError):
+            pass
+
+    # ---- 界面记忆 ----
+    def _restore_geometry(self, geo):
+        m = re.fullmatch(r"(\d+)x(\d+)([+-]-?\d+)([+-]-?\d+)", geo or "")
+        if not m:
+            return
+        w, h, x, y = (int(v) for v in m.groups())
+        sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
+        w, h = max(960, min(w, sw)), max(700, min(h, sh))
+        # 上次在副屏、或屏幕分辨率变了导致窗口跑到屏幕外时，只恢复大小
+        if -20 <= y <= sh - 80 and x + w >= 120 and x <= sw - 120:
+            self.root.geometry(f"{w}x{h}+{x}+{y}")
+        else:
+            self.root.geometry(f"{w}x{h}")
+
+    def _window_geometry(self):
+        try:
+            if self.root.state() == "normal":
+                return self.root.wm_geometry()
+        except tk.TclError:
+            pass
+        return None
+
+    def _schedule_ui_save(self):
+        if self._ui_save_job:
+            try: self.root.after_cancel(self._ui_save_job)
+            except tk.TclError: pass
+        self._ui_save_job = self.root.after(600, self._save_ui_state)
+
+    def _save_ui_state(self):
+        self._ui_save_job = None
+        updates = {"selected_profiles": self.selected_profiles(), "selection_saved": True,
+                   "last_page": self._page or "home"}
+        geo = self._window_geometry()
+        if geo:
+            updates["window_geometry"] = geo
+        try:
+            update_app_settings(PATHS, updates)
+        except OSError as e:
+            self.log(f"[CONFIG] 无法保存界面状态：{e}")
+
+    # ---- 窗口图标 / 系统托盘 ----
+    def _apply_window_icon(self):
+        try:
+            if os.name == "nt":
+                self.root.iconbitmap(default=str(self._icons[0]))
+            else:
+                img = tk.PhotoImage(width=32, height=32)
+                img.put(photo_rows(32))
+                self.root.iconphoto(True, img)
+                self._icon_img = img
+        except (tk.TclError, OSError):
+            pass
+
+    def _setup_tray(self):
+        self.status_var.trace_add("write", self._sync_tray)
+        self.root.bind("<Unmap>", self._on_unmap, add="+")
+        self.root.bind("<Configure>", lambda e: self._schedule_ui_save() if e.widget is self.root else None, add="+")
+        if not win_tray.available():
+            return
+        try:
+            tray = win_tray.TrayIcon(self._icons[0], f"FLY v{self.version}",
+                                     on_activate=lambda: self._ui(self.show_window),
+                                     menu=self._tray_menu, log=self.log)
+            if tray.start():
+                self.tray = tray
+            if not tray.added:
+                self.log("[TRAY] 托盘图标添加失败，关闭窗口将直接退出 FLY。")
+        except Exception as e:
+            self.log(f"[TRAY] 无法创建托盘图标：{e}")
+            self.tray = None
+        self._sync_tray()
+
+    def _tray_ok(self):
+        return bool(self.tray and self.tray.added)
+
+    def _tray_menu(self):
+        # 在托盘线程里调用：只读普通 Python 属性，不碰 Tk
+        text = self._status_text
+        running = "加速中" in text
+        starting = any(k in text for k in ("启动", "检测"))
+        return [
+            ("显示 FLY", lambda: self._ui(self.show_window), True),
+            None,
+            ("一键加速", lambda: self._ui(self.start_accel), not running and not starting),
+            ("换日本节点", lambda: self._ui(self.switch_node), running),
+            ("停止加速", lambda: self._ui(self.stop_accel), running or starting),
+            None,
+            ("退出 FLY", lambda: self._ui(self.on_close), True),
+        ]
+
+    def _sync_tray(self, *_):
+        try:
+            self._status_text = self.status_var.get()
+        except tk.TclError:
+            return
+        if self.tray:
+            try:
+                self.tray.set_tooltip(f"FLY · {self._status_text}")
+                self.tray.set_icon(self._icons[1] if "加速中" in self._status_text else self._icons[0])
+            except Exception:
+                pass
+
+    def _on_unmap(self, e):
+        # 最小化时收进托盘，不占任务栏
+        if e.widget is self.root and self._tray_ok() and load_app_settings(PATHS).get("close_to_tray", True):
+            self.root.after_idle(self._hide_if_iconic)
+
+    def _hide_if_iconic(self):
+        try:
+            if self.root.state() == "iconic":
+                self.hide_to_tray()
+        except tk.TclError:
+            pass
+
+    def hide_to_tray(self):
+        self._save_ui_state()
+        self.root.withdraw()
+        s = load_app_settings(PATHS)
+        if not s.get("tray_hint_shown"):
+            self.tray.balloon("FLY 仍在后台运行", "已收进系统托盘。单击托盘图标打开窗口，右键可以退出。")
+            update_app_settings(PATHS, {"tray_hint_shown": True})
+
+    def show_window(self):
+        try:
+            self.root.deiconify()
+            self.root.state("normal")
+            self.root.lift()
+            self.root.focus_force()
+            # Windows 不允许后台程序直接抢前台，短暂置顶一下再取消
+            self.root.attributes("-topmost", True)
+            self.root.after(120, lambda: self.root.attributes("-topmost", False))
+        except tk.TclError:
+            pass
+
+    def on_close_request(self):
+        if self._tray_ok() and load_app_settings(PATHS).get("close_to_tray", True):
+            self.hide_to_tray()
+        else:
+            self.on_close()
+
     def _open_runtime_dir(self):
         try:
             PATHS.runtime.mkdir(parents=True, exist_ok=True)
@@ -371,12 +558,19 @@ class FlyApp:
             child.destroy()
         self.profile_vars = {}
         initial = self.initial_ids if first else previous
-        if first and not initial and selectable:
-            initial = {selectable[0]["id"]}
+        if first and not initial:
+            # 记住上次勾选：用户主动全部取消也要保持取消，只有从没保存过才默认勾第一个
+            saved = load_app_settings(PATHS)
+            ids = {p["id"] for p in selectable}
+            if saved.get("selection_saved"):
+                initial = {pid for pid in saved.get("selected_profiles", []) if pid in ids}
+            elif selectable:
+                initial = {selectable[0]["id"]}
         for i, profile in enumerate(selectable):
             pid = profile["id"]
             var = tk.BooleanVar(value=pid in initial)
             var.trace_add("write", self._update_launch_hint)
+            var.trace_add("write", lambda *_: self._schedule_ui_save())
             self.profile_vars[pid] = var
             mode = "TUN" if _needs_tun(profile) else "域名"
             if profile.get("full_browser"):
@@ -497,56 +691,70 @@ class FlyApp:
     def _refresh_subscription_info(self, force=False):
         src=load_node_source(PATHS)
         if str(src.get("mode","file")).lower()!="subscription":
-            self.sub_var.set("本地节点模式（无订阅流量信息）"); return
+            self.quota_bars.message("本地节点模式（无订阅流量信息）"); return
         urls=[u for u in src.get("subscription_urls",[]) if u]
         if not urls:
-            self.sub_var.set("-"); return
+            self.quota_bars.message("未填写订阅"); return
         if self._sub_fetching: return
         if not force and time.time()-self._sub_last<60: return
         self._sub_fetching=True
-        self.sub_var.set("查询中...")
+        if not self.quota_bars.winfo_children():
+            self.quota_bars.message("正在查询订阅流量...")
         def work():
-            parts=[]
+            items=[]
             try:
                 for i,url in enumerate(urls,1):
+                    tag=f"#{i}" if len(urls)>1 else ""
                     try:
                         ok,info,reason=check_subscription(url)
-                        tag=f"#{i} " if len(urls)>1 else ""
-                        parts.append(tag+(describe_userinfo(info) if ok else f"订阅不可用（{reason}）"))
+                        if not ok:
+                            items.append((tag,None,f"订阅不可用（{reason}）"))
+                        else:
+                            items.append((tag,quota_from_userinfo(info),"订阅未提供流量信息"))
                     except Exception as e:
-                        parts.append(f"#{i} 查询失败（{type(e).__name__}）")
-                text=" ｜ ".join(parts) if parts else "订阅信息不可用"
+                        items.append((tag,None,f"查询失败（{type(e).__name__}）"))
             finally:
                 self._sub_fetching=False
                 self._sub_last=time.time()
-            self._ui(lambda t=text:self.sub_var.set(t))
+            self._ui(lambda it=items:self.quota_bars.set(it) if it else self.quota_bars.message("订阅信息不可用"))
         threading.Thread(target=work,daemon=True).start()
 
     def _start_traffic_monitor(self):
         if self._traffic_stop: self._traffic_stop.set()
         self._traffic_stop=threading.Event()
+        self._session_usage=[0, 0]
+        self._render_usage()
         s=load_app_settings(PATHS)
         api=MihomoApi(int(s.get("controller_port",19090)), s.get("api_secret",""))
         threading.Thread(target=self._traffic_loop,args=(self._traffic_stop,api),daemon=True).start()
 
     def _traffic_loop(self,stop,api):
         last=None
-        while not stop.wait(2):
-            if not self.core.is_running(): continue
-            try:
-                data=api.connections()
-                up=int(data.get("uploadTotal",0)); down=int(data.get("downloadTotal",0))
+        meter=ConnectionMeter("FLY-JP")
+        last_save=time.time()
+        try:
+            while not stop.wait(2):
+                if not self.core.is_running(): continue
+                try:
+                    data=api.connections()
+                    up=int(data.get("uploadTotal",0)); down=int(data.get("downloadTotal",0))
+                except Exception:
+                    last=None; meter.reset(); continue
                 now=time.time()
                 if last:
                     dt=max(0.5, now-last[0])
-                    text=(f"↑ {fmt_speed((up-last[1])/dt)}  ↓ {fmt_speed((down-last[2])/dt)}"
-                          f" · 本次经内核 {fmt_bytes(up+down)}（含直连）")
-                else:
-                    text=f"本次经内核 {fmt_bytes(up+down)}（含直连）"
+                    speed=(max(0,down-last[2])/dt, max(0,up-last[1])/dt)
+                    self._ui(lambda sp=speed:self.speed_chart.push(*sp))
                 last=(now,up,down)
-                self._ui(lambda t=text:self.traffic_var.set(t))
-            except Exception:
-                last=None
+                proxied,direct=meter.feed(data)
+                if stop.is_set(): break
+                self.usage.add(proxied,direct)
+                self._session_usage[0]+=proxied; self._session_usage[1]+=direct
+                self._ui(self._render_usage)
+                if now-last_save>=30:
+                    self.usage.save(); last_save=now
+        finally:
+            self.usage.save()
 
     def latency_targets(self, selected):
         """返回 (必须通过的测速地址, 仅用于排序的测速地址)。
@@ -658,20 +866,20 @@ class FlyApp:
         if self.services_var.get():
             effective+=[p["id"] for p in self.always_on if p["id"] not in effective]
         if not effective:
-            messagebox.showwarning("FLY","请至少勾选一个分流配置（或开启常用服务默认加速）。"); return
+            self.toast("请至少勾选一个分流配置（或开启常用服务默认加速）。","warn"); return
         empty=[self.profile_by_id[p]["name"] for p in effective if not profile_has_effect(self.profile_by_id[p])]
         if empty:
-            messagebox.showerror("FLY","以下配置没有任何有效分流规则，已拒绝启动：\n"+"、".join(empty)); return
+            self.toast("以下配置没有任何有效分流规则，已拒绝启动："+"、".join(empty),"err"); return
         if self._core_verifying:
-            messagebox.showinfo("FLY","正在校验加速内核，请稍后再点一键加速。"); return
+            self.toast("正在校验加速内核，请稍后再点一键加速。"); return
         if self._core_installing:
-            messagebox.showinfo("FLY","正在修复/安装加速内核，请完成后再点一键加速。"); return
+            self.toast("正在修复/安装加速内核，请完成后再点一键加速。"); return
         if self.core.verified_state() is not True:
             self.refresh_status()
-            messagebox.showinfo("FLY","加速内核尚未通过完整性校验；FLY 不会在验证前执行它。"); return
+            self.toast("加速内核尚未通过完整性校验；FLY 不会在验证前执行它。","warn"); return
         ok,_=node_source_is_configured(PATHS)
         if not ok:
-            messagebox.showwarning("FLY","请先在设置里配置你自己的节点/订阅。"); return
+            self.toast("请先在设置里配置你自己的节点/订阅。","warn"); return
         # UAC 信任边界：FLY 本体永远不提权。TUN 配置需要管理员时，
         # 只对哈希钉死、启动前刚校验过的 mihomo.exe 弹 UAC——
         # 用户可写目录里被篡改的 .py 拿不到管理员权限。
@@ -743,15 +951,15 @@ class FlyApp:
             self.log(f"[ERROR] {e}")
             self._teardown()
             self._ui(lambda:self.status_var.set("已停止"))
-            self._ui(lambda e=e:messagebox.showerror("FLY",str(e)))
+            self._ui(lambda e=e:self.toast(str(e),"err","启动失败"))
         finally:
             self._ui(lambda:self.start_btn.configure(state="normal"))
 
     def switch_node(self):
         if not self.core.is_running():
-            messagebox.showinfo("FLY","请先启动加速。"); return
+            self.toast("请先启动加速。"); return
         if not self._selection_lock.acquire(blocking=False):
-            messagebox.showinfo("FLY","正在进行节点检测/切换，请稍后再试。"); return
+            self.toast("正在进行节点检测/切换，请稍后再试。"); return
         self.switch_btn.configure(state="disabled")
         def work():
             try:
@@ -761,7 +969,7 @@ class FlyApp:
                 self._ui(lambda:self.node_var.set(n))
                 self._ui(lambda:self.delay_var.set(f"{d} ms" if d is not None else "unknown"))
             except Exception as e:
-                self._ui(lambda e=e:messagebox.showerror("FLY",str(e)))
+                self._ui(lambda e=e:self.toast(str(e),"err","换节点失败"))
             finally:
                 self._selection_lock.release()
                 self._ui(lambda:self.switch_btn.configure(state="normal"))
@@ -858,10 +1066,10 @@ class FlyApp:
         self._ui(lambda: self.status_var.set("内核异常退出"))
         self._ui(lambda: self.node_var.set("-"))
         self._ui(lambda: self.delay_var.set("-"))
-        self._ui(lambda: self.traffic_var.set("-"))
+        self._ui(lambda: self.speed_chart.idle())
         self._ui(lambda: self.start_btn.configure(state="normal"))
-        self._ui(lambda: messagebox.showwarning(
-            "FLY", "加速内核意外退出，已自动还原系统代理。\n详情见日志，可重新点“一键加速”。"))
+        self._ui(lambda: self.toast("已自动还原系统代理。详情见日志，可重新点“一键加速”。",
+                                    "warn", "加速内核意外退出"))
 
     def _teardown(self):
         self._start_cancel.set()
@@ -872,7 +1080,7 @@ class FlyApp:
             self._probe_now.set()   # 叫醒看门狗，让它立刻看到 stop 并退出
         if self._traffic_stop:
             self._traffic_stop.set(); self._traffic_stop=None
-        self._ui(lambda:self.traffic_var.set("-"))
+        self._ui(lambda:self.speed_chart.idle())
         with self._proxy_lock:
             if self.sysproxy_active:
                 self.sysproxy.restore(); self.sysproxy_active=False
@@ -893,6 +1101,13 @@ class FlyApp:
             self.log("[FLY] 等待启动流程退出...")
             t.join(timeout=5)
         self._teardown()
+        self.usage.save()
+        if self._ui_save_job:
+            try: self.root.after_cancel(self._ui_save_job)
+            except tk.TclError: pass
+        self._save_ui_state()
+        if self.tray:
+            self.tray.stop()
         try:
             if self._log_file:
                 with self._log_lock:
@@ -912,6 +1127,7 @@ class SettingsWindow(tk.Toplevel):
         self._sub_urls=list(src.get("subscription_urls",[]))
         self.timeout=tk.StringVar(value=str(app.get("latency_timeout_ms",5000)))
         self.sticky=tk.StringVar(value=str(app.get("sticky_max_delay_ms",1000)))
+        self.close_to_tray=tk.BooleanVar(value=bool(app.get("close_to_tray",True)))
         self.tun_profiles=[r for r in profiles if _needs_tun(r)]
         exes=app.get("game_exes",{})
         self.exe_vars={r["id"]:tk.StringVar(value=str(exes.get(r["id"],""))) for r in self.tun_profiles}
@@ -943,6 +1159,9 @@ class SettingsWindow(tk.Toplevel):
                 ttk.Entry(rr,textvariable=self.exe_vars[r["id"]]).pack(side="left",fill="x",expand=True)
                 ttk.Button(rr,text="浏览...",command=lambda pid=r["id"]:self.browse(pid)).pack(side="left",padx=(8,0))
 
+        if win_tray.available():
+            ttk.Checkbutton(f,variable=self.close_to_tray,
+                            text="关闭或最小化窗口时收进系统托盘（右键托盘图标可退出 FLY）").pack(anchor="w",pady=(12,0))
         ttk.Label(f,text="订阅 URL、UUID 等凭据只保存在本机 private\\ 目录，已被 Git 排除。FLY 不提供节点、账号、会员或 VPS 服务。",
                   wraplength=670).pack(anchor="w",pady=(14,0))
         ttk.Button(f,text="保存",style="Accent.TButton",command=self.save).pack(anchor="e",pady=(14,0))
@@ -956,7 +1175,7 @@ class SettingsWindow(tk.Toplevel):
             timeout=int(self.timeout.get().strip()); sticky=int(self.sticky.get().strip())
             if timeout<1000 or timeout>30000 or sticky<100: raise ValueError
         except ValueError:
-            messagebox.showerror("FLY","请输入有效数值：超时 1000–30000ms，沿用阈值 ≥100ms。"); return
+            toast(self,"请输入有效数值：超时 1000–30000ms，沿用阈值 ≥100ms。","err"); return
         urls=[u.strip() for u in self.sub_text.get("1.0","end").splitlines() if u.strip()]
         save_json(PATHS.node_source,{"mode":self.mode.get(),
                                      "subscription_urls":urls,
@@ -966,15 +1185,16 @@ class SettingsWindow(tk.Toplevel):
             value=var.get().strip()
             name=Path(value).name if value else ""
             if any(ch in name for ch in (",","#","\n","\r")):
-                messagebox.showerror("FLY",f"可执行文件名含分流规则不允许的字符：{name}"); return
+                toast(self,f"可执行文件名含分流规则不允许的字符：{name}","err"); return
             values[pid]=value
         def mutate(app):
             exes=dict(app.get("game_exes",{})); exes.update(values)
             app["game_exes"]=exes
             app["latency_timeout_ms"]=timeout
             app["sticky_max_delay_ms"]=sticky
+            app["close_to_tray"]=bool(self.close_to_tray.get())
         update_app_settings(PATHS, mutator=mutate)
-        self.on_saved(); messagebox.showinfo("FLY","设置已保存。"); self.destroy()
+        self.on_saved(); toast(self.master,"设置已保存。","ok"); self.destroy()
 
 class CustomSitesWindow(tk.Toplevel):
     def __init__(self,master,on_saved):
@@ -1021,7 +1241,7 @@ class CustomSitesWindow(tk.Toplevel):
         try:
             profile=profile_from_url(self.url_var.get(),self.name_var.get())
         except Exception as e:
-            messagebox.showerror("FLY",str(e),parent=self); return
+            toast(self,str(e),"err"); return
         existing=load_custom_profiles(PATHS)
         taken={p["id"] for p in list_routing_profiles(PATHS)}
         pid=profile["id"]; n=2
@@ -1032,6 +1252,7 @@ class CustomSitesWindow(tk.Toplevel):
         save_custom_profiles(PATHS,cleaned)
         self.url_var.set(""); self.name_var.set("")
         self.refresh_list(); self.on_saved(profile["id"])
+        toast(self,f"已添加「{profile['name']}」，并在主界面自动勾选。","ok")
 
     def remove_site(self,pid,name):
         if not messagebox.askyesno("FLY",f"删除「{name}」？",parent=self): return
@@ -1103,8 +1324,8 @@ class CustomProfilesWindow(tk.Toplevel):
                 raise ValueError("以下字段不合法：\n" + "\n".join(problems[:10]))
             save_custom_profiles(PATHS,data["profiles"])
         except Exception as e:
-            messagebox.showerror("FLY",f"配置 JSON 无效：\n{e}"); return
-        self.on_saved(); messagebox.showinfo("FLY","自定义配置已保存到本机。"); self.destroy()
+            toast(self,str(e),"err","配置 JSON 无效"); return
+        self.on_saved(); toast(self.master,"自定义配置已保存到本机。","ok"); self.destroy()
 
 def main():
     p=argparse.ArgumentParser(add_help=False)
@@ -1116,6 +1337,9 @@ def main():
 
     guard=SingleInstance()
     if not guard.acquire(wait_ms=10000 if args.takeover else 0):
+        # FLY 可能正收在托盘里：直接把已运行的窗口叫出来，而不是弹“已在运行”
+        if win_tray.signal_existing_instance():
+            return
         try:
             r=tk.Tk(); r.withdraw()
             messagebox.showwarning("FLY","FLY 已经在运行。请使用现有窗口，避免两个实例互相修改系统代理。")
