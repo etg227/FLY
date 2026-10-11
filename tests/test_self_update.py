@@ -1,85 +1,100 @@
-"""launcher.exe 的延后替换：不能借道可写临时目录，因为 FLY 可能是提权运行的。"""
-import subprocess, sys, tempfile, unittest
+"""launcher.exe 自我替换：v0.10 起 FLY 主程序就是 launcher.exe，运行期间文件一直被占用。"""
+import os, shutil, subprocess, tempfile, time, unittest
 from pathlib import Path
 from unittest import mock
 
 import backend.self_update as self_update
-from backend.self_update import _REPLACER, schedule_launcher_replace
+from backend.self_update import schedule_launcher_replace
 
 
-class Recorder:
-    def __init__(self): self.calls = []
-    def __call__(self, argv, **kw): self.calls.append((argv, kw)); return None
-
-
-class ScheduleTests(unittest.TestCase):
+class ReplaceTests(unittest.TestCase):
     def setUp(self):
         self.root = Path(tempfile.mkdtemp())
         (self.root / "launcher.exe.new").write_bytes(b"new launcher")
         (self.root / "launcher.exe").write_bytes(b"old launcher")
+        self.win = mock.patch.object(self_update, "_IS_WINDOWS", True)
+        self.win.start()
+
+    def tearDown(self):
+        self.win.stop()
 
     def test_noop_when_nothing_is_pending(self):
         (self.root / "launcher.exe.new").unlink()
-        spawn = Recorder()
-        with mock.patch.object(self_update, "_IS_WINDOWS", True):
-            self.assertFalse(schedule_launcher_replace(self.root, spawn=spawn))
-        self.assertEqual(spawn.calls, [])
+        self.assertFalse(schedule_launcher_replace(self.root))
+        self.assertEqual((self.root / "launcher.exe").read_bytes(), b"old launcher")
 
-    def test_does_not_write_any_script_file(self):
-        before = set(Path(tempfile.gettempdir()).glob("fly-launcher-update-*"))
-        spawn = Recorder()
-        with mock.patch.object(self_update, "_IS_WINDOWS", True):
-            self.assertTrue(schedule_launcher_replace(self.root, spawn=spawn))
-        after = set(Path(tempfile.gettempdir()).glob("fly-launcher-update-*"))
-        self.assertEqual(before, after, "不得在临时目录留下可被掉包的脚本")
+    def test_replaces_in_process_without_spawning_anything(self):
+        with mock.patch("subprocess.Popen") as popen:
+            self.assertTrue(schedule_launcher_replace(self.root))
+        popen.assert_not_called()
+        self.assertEqual((self.root / "launcher.exe").read_bytes(), b"new launcher")
+        self.assertFalse((self.root / "launcher.exe.new").exists())
         self.assertEqual(list(self.root.glob("*.cmd")), [])
 
-    def test_runs_the_current_interpreter_not_a_shell_script(self):
-        spawn = Recorder()
-        with mock.patch.object(self_update, "_IS_WINDOWS", True), \
-             mock.patch.object(self_update.sys, "frozen", False, create=True):
-            schedule_launcher_replace(self.root, spawn=spawn)
-        argv = spawn.calls[0][0]
-        self.assertEqual(argv[0], sys.executable)
-        self.assertEqual(argv[1], "-c")
-        self.assertNotIn("cmd.exe", " ".join(argv).lower())
-        for part in argv:
-            self.assertFalse(str(part).lower().endswith(".cmd"))
-        # 源码是 argv 里的字面量，不是磁盘上的路径
-        self.assertIn("os.replace", argv[2])
-        self.assertEqual(argv[3:], [str(self.root / "launcher.exe.new"),
-                                    str(self.root / "launcher.exe")])
+    def test_old_launcher_is_removed_when_not_in_use(self):
+        schedule_launcher_replace(self.root)
+        self.assertEqual(list(self.root.glob("launcher.exe.old*")), [])
 
-    def test_frozen_mode_uses_powershell_with_paths_in_environment(self):
-        spawn = Recorder()
-        with mock.patch.object(self_update, "_IS_WINDOWS", True), \
-             mock.patch.object(self_update.sys, "frozen", True, create=True):
-            self.assertTrue(schedule_launcher_replace(self.root, spawn=spawn))
-        argv, kw = spawn.calls[0]
-        self.assertEqual(argv[0].lower(), "powershell.exe")
-        self.assertIn("-Command", argv)
-        self.assertNotIn(str(self.root), " ".join(argv),
-                         "user-controlled paths must not be interpolated into PowerShell code")
-        self.assertEqual(kw["env"]["FLY_REPLACE_SRC"],
-                         str(self.root / "launcher.exe.new"))
-        self.assertEqual(kw["env"]["FLY_REPLACE_DST"],
-                         str(self.root / "launcher.exe"))
-        self.assertEqual(list(self.root.glob("*.cmd")), [])
+    def test_leftover_old_launchers_are_cleaned_next_time(self):
+        (self.root / "launcher.exe.new").unlink()
+        (self.root / "launcher.exe.old.1.2").write_bytes(b"stale")
+        schedule_launcher_replace(self.root)
+        self.assertEqual(list(self.root.glob("launcher.exe.old*")), [])
 
-    def test_replacer_source_actually_replaces(self):
-        src, dst = self.root / "launcher.exe.new", self.root / "launcher.exe"
-        r = subprocess.run([sys.executable, "-c", _REPLACER, str(src), str(dst)],
-                           capture_output=True, text=True, timeout=60)
-        self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(dst.read_bytes(), b"new launcher")
-        self.assertFalse(src.exists())
-
-    def test_spawn_failure_is_reported_not_raised(self):
-        def boom(*a, **k): raise OSError("nope")
+    def test_failure_rolls_back_and_keeps_pending(self):
+        real_replace = os.replace
+        def flaky(src, dst):
+            if str(src).endswith("launcher.exe.new"):
+                raise PermissionError("blocked by AV")
+            return real_replace(src, dst)
         logs = []
-        with mock.patch.object(self_update, "_IS_WINDOWS", True):
-            self.assertFalse(schedule_launcher_replace(self.root, logs.append, spawn=boom))
-        self.assertTrue(any("失败" in x for x in logs))
+        with mock.patch.object(self_update.os, "replace", side_effect=flaky):
+            self.assertFalse(schedule_launcher_replace(self.root, logs.append))
+        self.assertEqual((self.root / "launcher.exe").read_bytes(), b"old launcher",
+                         "失败后必须回滚，目录里不能没有启动器")
+        self.assertTrue((self.root / "launcher.exe.new").exists(), "留到下次重试")
+        self.assertTrue(any("替换失败" in x for x in logs))
+
+    def test_first_install_without_existing_launcher(self):
+        (self.root / "launcher.exe").unlink()
+        self.assertTrue(schedule_launcher_replace(self.root))
+        self.assertEqual((self.root / "launcher.exe").read_bytes(), b"new launcher")
+
+    def test_non_windows_is_a_noop(self):
+        with mock.patch.object(self_update, "_IS_WINDOWS", False):
+            self.assertFalse(schedule_launcher_replace(self.root))
+        self.assertTrue((self.root / "launcher.exe.new").exists())
+
+
+@unittest.skipUnless(os.name == "nt", "需要真实 Windows 的 exe 文件锁语义")
+class RunningExecutableTests(unittest.TestCase):
+    """核心前提：Windows 不让覆盖运行中的 exe，但允许改名。在真机上验证。"""
+
+    def test_running_launcher_is_replaced(self):
+        root = Path(tempfile.mkdtemp())
+        system32 = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32"
+        exe = root / "launcher.exe"
+        shutil.copy2(system32 / "PING.EXE", exe)          # 只依赖系统 DLL，拷走也能跑
+        new_bytes = (system32 / "PING.EXE").read_bytes() + b"\0FLY-NEW"
+        (root / "launcher.exe.new").write_bytes(new_bytes)
+        proc = subprocess.Popen([str(exe), "-n", "30", "127.0.0.1"],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            time.sleep(1.0)
+            self.assertIsNone(proc.poll(), "替身进程应仍在运行")
+            with self.assertRaises(PermissionError):
+                os.remove(exe)                            # 证明文件确实被运行中的进程占用
+            self.assertTrue(schedule_launcher_replace(root))
+            self.assertEqual(exe.read_bytes(), new_bytes)
+            self.assertIsNone(proc.poll(), "替换不应影响正在运行的旧进程")
+            self.assertEqual(len(list(root.glob("launcher.exe.old*"))), 1, "运行中的旧文件留待下次清理")
+        finally:
+            proc.kill(); proc.wait(timeout=10)
+        time.sleep(0.5)
+        (root / "launcher.exe.new").write_bytes(b"x")       # 触发下一次调用
+        os.remove(root / "launcher.exe.new")
+        schedule_launcher_replace(root)
+        self.assertEqual(list(root.glob("launcher.exe.old*")), [], "旧进程退出后应被清理")
 
 
 if __name__ == "__main__":

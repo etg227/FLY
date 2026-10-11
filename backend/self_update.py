@@ -1,84 +1,56 @@
 from __future__ import annotations
-import os, subprocess, sys
+import os, time
 from pathlib import Path
-from .frozen_env import child_env, dll_search_reset
 
-# 替换动作跑在一个独立的解释器进程里，源码通过 -c 传参，不落盘。
-#
-# 之前的做法是往 %TEMP% 写一个文件名可预测的 .cmd 再执行它。TUN 模式下
-# 整个 FLY 是以管理员身份运行的，于是就成了「提权进程执行同用户可写目录里
-# 的脚本」——同用户的非提权进程可以抢先占位或在写入与执行之间掉包，拿到
-# 管理员权限的代码执行。不写文件就没有这个窗口。
 _IS_WINDOWS = os.name == "nt"
 
-_REPLACER = (
-    "import os,sys,time\n"
-    "src,dst=sys.argv[1],sys.argv[2]\n"
-    "ok=False\n"
-    "for _ in range(30):\n"
-    "    try:\n"
-    "        os.replace(src,dst)\n"
-    "        ok=True\n"
-    "        break\n"
-    "    except OSError:\n"
-    "        time.sleep(1)\n"
-    "sys.exit(0 if ok else 3)\n"
-)
+def _cleanup_old(root: Path):
+    """删掉之前替换留下的旧启动器；还在运行的删不掉，下次再试。"""
+    for old in root.glob("launcher.exe.old*"):
+        try:
+            old.unlink()
+        except OSError:
+            pass
 
-def schedule_launcher_replace(root: Path, log=lambda m: None, spawn=None):
-    """Replace launcher.exe after the currently running copy releases it.
+def schedule_launcher_replace(root: Path, log=lambda m: None):
+    """把更新包带来的 launcher.exe.new 换上去。
 
-    Source-mode FLY can use its Python interpreter as the detached replacer.
-    Frozen standalone FLY is itself launcher.exe, so sys.executable -c would
-    merely re-enter the launcher. In that mode use the system PowerShell
-    executable with an inline retry loop and pass paths through environment
-    variables (no temp script and no command-line interpolation).
+    Windows 不允许覆盖或删除正在运行的 exe，但**允许重命名**。v0.10 起
+    FLY 主程序本身就是 launcher.exe（--run-main），整个会话期间这个文件都被
+    占用；以前「等它释放再覆盖」的外部替换进程只重试 30 秒，几乎永远装不上，
+    启动器自身的修复也就永远到不了用户手里。
+
+    现在在当前进程里直接：launcher.exe → launcher.exe.old.<随机>，再把 .new
+    移到 launcher.exe。正在运行的旧进程不受影响，下次启动用的就是新启动器。
+    不起外部进程、不落临时脚本，也就不存在临时目录被锁或提权相关的问题。
     """
     root = Path(root)
     pending = root / "launcher.exe.new"
     target = root / "launcher.exe"
-    if not _IS_WINDOWS or not pending.exists():
+    if not _IS_WINDOWS:
         return False
-    spawn = spawn or subprocess.Popen
+    _cleanup_old(root)
+    if not pending.exists():
+        return False
+    old = root / f"launcher.exe.old.{os.getpid()}.{int(time.time())}"
+    moved_old = False
     try:
-        if getattr(sys, "frozen", False):
-            ps = (
-                "$src=$env:FLY_REPLACE_SRC; $dst=$env:FLY_REPLACE_DST; "
-                "$ok=$false; "
-                "for($i=0;$i -lt 30;$i++){"
-                "try { Move-Item -LiteralPath $src -Destination $dst -Force -ErrorAction Stop; "
-                "$ok=$true; break } "
-                "catch { Start-Sleep -Seconds 1 }}; "
-                "if($ok){exit 0}else{exit 3}"
-            )
-            # 替换进程设计上会比 FLY 活得久；不能让它从 FLY 的 _MEI 加载任何
-            # 文件，否则 FLY 退出时临时目录删不掉、弹出 PyInstaller 警告。
-            env = child_env()
-            env["FLY_REPLACE_SRC"] = str(pending)
-            env["FLY_REPLACE_DST"] = str(target)
-            with dll_search_reset():
-                spawn(
-                    ["powershell.exe", "-NoProfile", "-NonInteractive",
-                     "-WindowStyle", "Hidden", "-Command", ps],
-                    cwd=str(root),
-                    env=env,
-                    stdin=subprocess.DEVNULL,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-                )
-        else:
-            if not sys.executable:
-                log("[UPDATE] 找不到当前解释器，launcher.exe 自动替换已跳过。")
-                return False
-            spawn([sys.executable, "-c", _REPLACER, str(pending), str(target)],
-                  cwd=str(root),
-                  stdin=subprocess.DEVNULL,
-                  stdout=subprocess.DEVNULL,
-                  stderr=subprocess.DEVNULL,
-                  creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-        log("[UPDATE] 已安排 launcher.exe 在当前程序退出后安全替换。")
-        return True
-    except Exception as e:
-        log(f"[UPDATE] launcher.exe 自动替换安排失败：{e}")
+        if target.exists():
+            os.replace(target, old)          # 运行中的 exe 只能改名，不能覆盖
+            moved_old = True
+        os.replace(pending, target)
+    except OSError as e:
+        if moved_old and not target.exists():
+            try:
+                os.replace(old, target)      # 回滚，绝不能让目录里没有启动器
+            except OSError:
+                pass
+        log(f"[UPDATE] launcher.exe 替换失败（{e}），新版本保留为 launcher.exe.new，下次启动重试。")
         return False
+    log("[UPDATE] launcher.exe 已更新，下次启动生效。")
+    if moved_old:
+        try:
+            old.unlink()                     # 旧启动器已退出时可直接删掉
+        except OSError:
+            pass                             # 仍在运行：下次启动时清理
+    return True
